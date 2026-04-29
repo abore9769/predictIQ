@@ -161,9 +161,10 @@ async fn main() -> anyhow::Result<()> {
     let service_worker = email_service.clone();
     let email_token = coordinator.token();
     let email_coord = coordinator.clone();
+    let stale_threshold = state.config.email_stale_job_threshold_secs;
     tokio::spawn(async move {
         queue_worker
-            .start_worker(service_worker, email_token, email_coord)
+            .start_worker(service_worker, email_token, email_coord, stale_threshold)
             .await;
     });
 
@@ -227,8 +228,28 @@ async fn main() -> anyhow::Result<()> {
         ))
         .with_state(state.clone());
 
+    // ── Webhook routes (provider-signed, no admin auth required) ──────────────┐
+    // Provider webhooks like SendGrid are authenticated via cryptographic       │
+    // signatures in request headers, NOT via API keys. This is the correct      │
+    // security model: the webhook endpoint trusts the provider to sign requests,│
+    // and verifies the signature matches known credentials.                     │
+    //                                                                           │
+    // Middleware stack (order matters — applied inside-out):                    │
+    // 1. sendgrid_webhook_middleware: verify provider signature                │
+    // 2. request_size_validation_middleware: prevent payload bombs              │
+    // 3. security_headers_middleware: add security headers                      │
+    // 4. correlation_id_middleware: request tracing                             │
+    // 5. TraceLayer: OpenTelemetry tracing                                      │
+    //                                                                           │
+    // Notable omissions (admin auth NOT required):                              │
+    // - api_key_middleware: webhooks are provider-signed                        │
+    // - ip_whitelist_middleware: webhooks come from SendGrid IPs               │
+    // - idempotency_middleware: webhook events are idempotent by nature         │
+    // - audit_logging_middleware: webhook events are tracked via email_events  │
     let webhook_routes = Router::new()
         .route("/webhooks/sendgrid", post(handlers::sendgrid_webhook))
+        .layer(middleware::from_fn(validation::request_size_validation_middleware))
+        .layer(middleware::from_fn(security::security_headers_middleware))
         .layer(middleware::from_fn_with_state(
             security::WebhookConfig {
                 secret: state.config.sendgrid_webhook_secret.clone(),
@@ -238,11 +259,6 @@ async fn main() -> anyhow::Result<()> {
         ))
         .layer(middleware::from_fn(correlation::correlation_id_middleware))
         .layer(TraceLayer::new_for_http())
-<<<<<<< feat/admin-security-middleware-446-447-448-449
-=======
-        .layer(middleware::from_fn(security::security_headers_middleware))
-        .layer(middleware::from_fn(validation::request_size_validation_middleware))
->>>>>>> main
         .with_state(state.clone());
 
     let admin_routes = Router::new()

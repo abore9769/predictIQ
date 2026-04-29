@@ -478,6 +478,19 @@ impl Database {
     }
 
     // Email event tracking
+    /// Create an email event record.
+    ///
+    /// ## PII Considerations
+    ///
+    /// The `recipient` field contains a personally identifiable email address.
+    /// This is stored for analytics purposes: to correlate events with recipients,
+    /// calculate delivery success rates, and track engagement per email domain.
+    ///
+    /// Important:
+    /// - The email_events table should be protected from unauthorized access
+    /// - Analytics queries should anonymize or filter recipient data for reports
+    /// - Deletion policies must align with privacy regulations (GDPR, etc)
+    /// - Consider hashing or tokenizing recipient emails in analytics aggregates
     pub async fn email_create_event(
         &self,
         job_id: Option<uuid::Uuid>,
