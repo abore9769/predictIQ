@@ -466,7 +466,24 @@ paths:
     post:
       tags: [webhooks]
       operationId: sendgridWebhook
-      summary: SendGrid event webhook receiver
+      summary: SendGrid event webhook receiver (provider-signed)
+      description: |
+        Receives webhook events from SendGrid for email delivery, bounce, complaint, 
+        and engagement tracking (opens, clicks, unsubscribes).
+        
+        ## Security Model
+        
+        This endpoint uses **provider signature verification** (not API key authentication).
+        
+        - **Authentication**: HMAC-SHA256 signature in `X-Twilio-Email-Event-Webhook-Signature` header
+        - **Timestamp verification**: `X-Twilio-Email-Event-Webhook-Timestamp` must be within 300 seconds
+        - **Replay protection**: Checked per (message_id, event_type, recipient, timestamp)
+        
+        This security model is appropriate for webhooks because:
+        1. SendGrid is the only caller (not user-initiated)
+        2. Signature proves the provider encrypted the request
+        3. No need for per-user API keys on public-facing webhook endpoints
+        
       security:
         - SendGridWebhook: []
       parameters:
@@ -475,13 +492,14 @@ paths:
           required: true
           schema:
             type: string
-          description: HMAC-SHA256 signature of timestamp+body, base64-encoded
+          description: HMAC-SHA256 signature of timestamp+body, base64-encoded. Signature is computed as Base64(HMAC-SHA256(secret, timestamp+body))
         - name: X-Twilio-Email-Event-Webhook-Timestamp
           in: header
           required: true
           schema:
             type: string
-          description: Unix timestamp of the request (replay protection window is 300 s)
+            format: int64
+          description: Unix timestamp of the request (replay protection window is 300 seconds)
       requestBody:
         required: true
         content:
@@ -492,8 +510,26 @@ paths:
                 $ref: "#/components/schemas/AnyObject"
       responses:
         "200":
-          description: Webhook processed
+          description: Webhook processed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  processed:
+                    type: integer
+                    description: Number of events processed
+                  errors:
+                    type: array
+                    items:
+                      type: string
+                    nullable: true
+                    description: List of processing errors, if any
+        "400":
+          description: Invalid request or signature
+          $ref: "#/components/responses/ApiError"
         "401":
+          description: Signature verification failed (not authorized as SendGrid)
           $ref: "#/components/responses/ApiError"
 
 components:

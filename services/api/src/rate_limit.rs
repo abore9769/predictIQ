@@ -54,6 +54,11 @@ pub async fn contact_rate_limit_middleware(
 }
 
 /// Analytics endpoint rate limiting (1000 req/min per session)
+/// 
+/// Key generation strategy (no allocations leak):
+/// - Prefers x-session-id header if provided (client-supplied session tracking)
+/// - Falls back to client IP if header missing
+/// - Both paths use owned Strings; no Box::leak or static string tricks
 pub async fn analytics_rate_limit_middleware(
     State(limiter): State<Arc<RateLimiter>>,
     headers: HeaderMap,
@@ -62,6 +67,9 @@ pub async fn analytics_rate_limit_middleware(
     next: Next,
 ) -> Result<Response, StatusCode> {
     let ip = extract_client_ip(&headers, connect_info.as_ref(), true);
+    
+    // Build rate limit key using either session ID or IP as fallback.
+    // This uses owned String creation in all paths — no Box::leak required.
     let session_id = headers
         .get("x-session-id")
         .and_then(|h| h.to_str().ok())

@@ -197,6 +197,10 @@ pub struct Config {
     pub newsletter_rate_limit_max: usize,
     /// Newsletter subscribe rate limit window (seconds). Default: 3600.
     pub newsletter_rate_limit_window_secs: u64,
+    /// Email job stale threshold (seconds). Jobs in processing set longer than this
+    /// are considered orphaned and will be re-queued on worker startup.
+    /// Default: 3600 (1 hour). Set via `EMAIL_STALE_JOB_THRESHOLD_SECS`.
+    pub email_stale_job_threshold_secs: u64,
     /// HMAC secret for signing unsubscribe tokens.
     pub unsubscribe_signing_secret: Option<String>,
     /// CORS policy.  See [`CorsConfig`] for per-field documentation.
@@ -393,6 +397,10 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(5),
             newsletter_rate_limit_window_secs: env::var("NEWSLETTER_RATE_LIMIT_WINDOW_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3600),
+            email_stale_job_threshold_secs: env::var("EMAIL_STALE_JOB_THRESHOLD_SECS")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(3600),
