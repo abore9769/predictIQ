@@ -33,12 +33,40 @@ infrastructure/
 
 ## Quick Start
 
+### Bootstrap Terraform State Backend (First Time Only)
+
+Before initializing Terraform, you must create the S3 bucket and DynamoDB table for remote state management:
+
+```bash
+cd infrastructure/terraform
+
+# Bootstrap for development environment
+./bootstrap.sh us-east-1 dev
+
+# Bootstrap for staging environment
+./bootstrap.sh us-east-1 staging
+
+# Bootstrap for production environment
+./bootstrap.sh us-east-1 prod
+```
+
+The bootstrap script will:
+1. Create an S3 bucket for Terraform state
+2. Enable versioning and encryption on the bucket
+3. Block public access to the bucket
+4. Create a DynamoDB table for state locking
+5. Enable point-in-time recovery on the DynamoDB table
+
 ### Initialize Terraform
 
 ```bash
 cd infrastructure/terraform
-terraform init
+
+# Initialize with backend configuration
+terraform init -backend-config=backend-config.hcl
 ```
+
+**Note:** The `backend-config.hcl` file contains the S3 bucket and DynamoDB table names. Update this file if you used different names during bootstrap.
 
 ### Plan Infrastructure Changes
 
