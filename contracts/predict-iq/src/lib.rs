@@ -301,6 +301,10 @@ impl PredictIQ {
         crate::modules::governance::vote_on_guardian_removal(&e, voter, approve)
     }
 
+    pub fn execute_guardian_removal(e: Env) -> Result<(), ErrorCode> {
+        crate::modules::governance::execute_guardian_removal(&e)
+    }
+
     pub fn get_guardians(e: Env) -> Vec<crate::types::Guardian> {
         crate::modules::governance::get_guardians(&e)
     }
