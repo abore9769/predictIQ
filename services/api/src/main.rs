@@ -91,6 +91,9 @@ async fn main() -> anyhow::Result<()> {
         config.trace_sample_rate,
     )?;
 
+    // Validate required configuration before proceeding
+    config.validate()?;
+
     let metrics = Metrics::new()?;
     let cache = RedisCache::new(&config.redis_url).await?;
     let db = Database::new(&config.database_url, cache.clone(), metrics.clone(), &config.db_pool).await?;

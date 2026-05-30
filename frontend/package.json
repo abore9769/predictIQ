@@ -32,10 +32,10 @@
     "playwright:install": "playwright install --with-deps"
   },
   "dependencies": {
-    "next": "^16.2.6",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "zod": "^3.23.8"
+    "next": "16.2.6",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "zod": "3.25.76"
   },
   "devDependencies": {
     "@axe-core/react": "^4.8.0",

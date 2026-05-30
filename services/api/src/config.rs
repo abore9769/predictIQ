@@ -1,10 +1,10 @@
+use ipnet::IpNet;
 use std::{
     env,
     net::{IpAddr, SocketAddr},
     str::FromStr,
     time::Duration,
 };
-use ipnet::IpNet;
 
 // ── CORS configuration ────────────────────────────────────────────────────────
 
@@ -149,6 +149,12 @@ pub struct Config {
     pub bind_addr: SocketAddr,
     pub redis_url: String,
     pub database_url: String,
+    pub hmac_key: String,
+    /// Previous HMAC key for zero-downtime key rotation. Optional.
+    pub hmac_key_previous: Option<String>,
+    /// Grace period in seconds for accepting tokens signed with the previous key.
+    /// Default: 3600 (1 hour). Set via `HMAC_KEY_ROTATION_GRACE_SECONDS`.
+    pub hmac_key_rotation_grace_seconds: u64,
     pub db_pool: DbPoolConfig,
     pub blockchain_rpc_url: String,
     pub blockchain_network: BlockchainNetwork,
@@ -282,6 +288,12 @@ impl Config {
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
             database_url: env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1/predictiq".to_string()),
+            hmac_key: env::var("HMAC_KEY").unwrap_or_default(),
+            hmac_key_previous: env::var("HMAC_KEY_PREVIOUS").ok(),
+            hmac_key_rotation_grace_seconds: env::var("HMAC_KEY_ROTATION_GRACE_SECONDS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3600),
             db_pool: DbPoolConfig {
                 min_connections: db_pool_min,
                 max_connections: db_pool_max,
@@ -417,6 +429,58 @@ impl Config {
             BlockchainNetwork::Custom => "custom",
         }
     }
+
+    /// Validate all required environment variables at startup.
+    ///
+    /// Checks that:
+    /// - DATABASE_URL is set and non-empty, and is a valid PostgreSQL connection string
+    /// - REDIS_URL is set and non-empty, and is a valid Redis connection string
+    /// - HMAC_KEY is set and non-empty
+    ///
+    /// Returns `Err` if any required var is missing, empty, or malformed.
+    /// On error, prints a clear message to stderr and exits with code 1.
+    pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut errors = Vec::new();
+
+        // Validate DATABASE_URL
+        if self.database_url.is_empty() {
+            errors.push("DATABASE_URL: environment variable is not set or is empty".to_string());
+        } else {
+            // Check if it's a valid PostgreSQL connection string (basic validation)
+            if !self.database_url.starts_with("postgres://")
+                && !self.database_url.starts_with("postgresql://")
+            {
+                errors.push(format!("DATABASE_URL: invalid format, expected 'postgres://' or 'postgresql://', got '{}'", self.database_url));
+            }
+        }
+
+        // Validate REDIS_URL
+        if self.redis_url.is_empty() {
+            errors.push("REDIS_URL: environment variable is not set or is empty".to_string());
+        } else {
+            // Check if it's a valid Redis connection string (basic validation)
+            if !self.redis_url.starts_with("redis://") && !self.redis_url.starts_with("rediss://") {
+                errors.push(format!(
+                    "REDIS_URL: invalid format, expected 'redis://' or 'rediss://', got '{}'",
+                    self.redis_url
+                ));
+            }
+        }
+
+        // Validate HMAC_KEY
+        if self.hmac_key.is_empty() {
+            errors.push("HMAC_KEY: environment variable is not set or is empty".to_string());
+        }
+
+        if !errors.is_empty() {
+            for error in &errors {
+                eprintln!("Configuration error: {}", error);
+            }
+            return Err("Required configuration variables are missing or invalid".into());
+        }
+
+        Ok(())
+    }
 }
 
 /// Versioned contract storage key schema.
@@ -465,7 +529,11 @@ pub struct SchemaValidationError {
 
 impl std::fmt::Display for SchemaValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "contract key schema validation failed: {}", self.errors.join("; "))
+        write!(
+            f,
+            "contract key schema validation failed: {}",
+            self.errors.join("; ")
+        )
     }
 }
 
@@ -485,14 +553,12 @@ impl ContractKeySchema {
         let platform_stats = env::var("CONTRACT_KEY_PLATFORM_STATS")
             .unwrap_or_else(|_| "platform:stats".to_string());
 
-        let health_check = env::var("CONTRACT_KEY_HEALTH_CHECK")
-            .unwrap_or_else(|_| platform_stats.clone());
+        let health_check =
+            env::var("CONTRACT_KEY_HEALTH_CHECK").unwrap_or_else(|_| platform_stats.clone());
 
         Self {
-            version: env::var("CONTRACT_KEY_VERSION")
-                .unwrap_or_else(|_| "1.0.0".to_string()),
-            market: env::var("CONTRACT_KEY_MARKET")
-                .unwrap_or_else(|_| "market:{id}".to_string()),
+            version: env::var("CONTRACT_KEY_VERSION").unwrap_or_else(|_| "1.0.0".to_string()),
+            market: env::var("CONTRACT_KEY_MARKET").unwrap_or_else(|_| "market:{id}".to_string()),
             platform_stats,
             user_bets: env::var("CONTRACT_KEY_USER_BETS")
                 .unwrap_or_else(|_| "user_bets:{id}".to_string()),
@@ -559,5 +625,290 @@ impl ContractKeySchema {
     /// Resolve the oracle-result key for `market_id`.
     pub fn oracle_result_key(&self, market_id: i64) -> String {
         self.oracle_result.replace("{id}", &market_id.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_validate_all_required_vars_present() {
+        let config = Config {
+            bind_addr: "127.0.0.1:8080".parse().unwrap(),
+            redis_url: "redis://127.0.0.1:6379".to_string(),
+            database_url: "postgres://postgres@localhost/predictiq".to_string(),
+            hmac_key: "secret-key-value".to_string(),
+            hmac_key_previous: None,
+            hmac_key_rotation_grace_seconds: 3600,
+            db_pool: DbPoolConfig {
+                min_connections: 5,
+                max_connections: 25,
+                acquire_timeout: Duration::from_secs(5),
+                idle_timeout: None,
+                max_lifetime: None,
+                query_timeout: Duration::from_secs(30),
+            },
+            blockchain_rpc_url: "https://testnet.soroban.org".to_string(),
+            blockchain_network: BlockchainNetwork::Testnet,
+            contract_id: "contract_id".to_string(),
+            retry_attempts: 3,
+            retry_base_delay_ms: 200,
+            event_poll_interval: Duration::from_secs(5),
+            tx_poll_interval: Duration::from_secs(4),
+            confirmation_ledger_lag: 3,
+            sync_market_ids: vec![],
+            featured_limit: 10,
+            content_default_page_size: 20,
+            sendgrid_api_key: None,
+            from_email: None,
+            base_url: "http://localhost:8080".to_string(),
+            api_keys: vec![],
+            admin_whitelist_ips: vec![],
+            trust_proxy: true,
+            request_signing_secret: None,
+            sendgrid_webhook_secret: None,
+            webhook_replay_window_secs: 300,
+            trusted_proxy_cidrs: vec![],
+            metrics_public: false,
+            metrics_allowlist_ips: vec![],
+            otlp_endpoint: None,
+            trace_sample_rate: 0.1,
+            idempotency_window_secs: 86400,
+            newsletter_token_ttl_secs: 86400,
+            gdpr_export_rate_limit: 3,
+            gdpr_export_rate_window_secs: 3600,
+            newsletter_rate_limit_max: 5,
+            newsletter_rate_limit_window_secs: 3600,
+            email_stale_job_threshold_secs: 3600,
+            unsubscribe_signing_secret: None,
+            cors: CorsConfig {
+                dev_mode: false,
+                allowed_origins: vec![],
+                allowed_methods: vec!["GET".to_string()],
+                allowed_headers: vec!["content-type".to_string()],
+                allow_credentials: false,
+                max_age_secs: 3600,
+            },
+            contract_key_schema: ContractKeySchema {
+                version: "1.0.0".to_string(),
+                market: "market:{id}".to_string(),
+                platform_stats: "platform:stats".to_string(),
+                user_bets: "user_bets:{id}".to_string(),
+                oracle_result: "oracle_result:{id}".to_string(),
+                health_check: "platform:stats".to_string(),
+            },
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_validate_missing_hmac_key() {
+        let config = Config {
+            bind_addr: "127.0.0.1:8080".parse().unwrap(),
+            redis_url: "redis://127.0.0.1:6379".to_string(),
+            database_url: "postgres://postgres@localhost/predictiq".to_string(),
+            hmac_key: "".to_string(),
+            hmac_key_previous: None,
+            hmac_key_rotation_grace_seconds: 3600,
+            db_pool: DbPoolConfig {
+                min_connections: 5,
+                max_connections: 25,
+                acquire_timeout: Duration::from_secs(5),
+                idle_timeout: None,
+                max_lifetime: None,
+                query_timeout: Duration::from_secs(30),
+            },
+            blockchain_rpc_url: "https://testnet.soroban.org".to_string(),
+            blockchain_network: BlockchainNetwork::Testnet,
+            contract_id: "contract_id".to_string(),
+            retry_attempts: 3,
+            retry_base_delay_ms: 200,
+            event_poll_interval: Duration::from_secs(5),
+            tx_poll_interval: Duration::from_secs(4),
+            confirmation_ledger_lag: 3,
+            sync_market_ids: vec![],
+            featured_limit: 10,
+            content_default_page_size: 20,
+            sendgrid_api_key: None,
+            from_email: None,
+            base_url: "http://localhost:8080".to_string(),
+            api_keys: vec![],
+            admin_whitelist_ips: vec![],
+            trust_proxy: true,
+            request_signing_secret: None,
+            sendgrid_webhook_secret: None,
+            webhook_replay_window_secs: 300,
+            trusted_proxy_cidrs: vec![],
+            metrics_public: false,
+            metrics_allowlist_ips: vec![],
+            otlp_endpoint: None,
+            trace_sample_rate: 0.1,
+            idempotency_window_secs: 86400,
+            newsletter_token_ttl_secs: 86400,
+            gdpr_export_rate_limit: 3,
+            gdpr_export_rate_window_secs: 3600,
+            newsletter_rate_limit_max: 5,
+            newsletter_rate_limit_window_secs: 3600,
+            email_stale_job_threshold_secs: 3600,
+            unsubscribe_signing_secret: None,
+            cors: CorsConfig {
+                dev_mode: false,
+                allowed_origins: vec![],
+                allowed_methods: vec!["GET".to_string()],
+                allowed_headers: vec!["content-type".to_string()],
+                allow_credentials: false,
+                max_age_secs: 3600,
+            },
+            contract_key_schema: ContractKeySchema {
+                version: "1.0.0".to_string(),
+                market: "market:{id}".to_string(),
+                platform_stats: "platform:stats".to_string(),
+                user_bets: "user_bets:{id}".to_string(),
+                oracle_result: "oracle_result:{id}".to_string(),
+                health_check: "platform:stats".to_string(),
+            },
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validate_malformed_database_url() {
+        let config = Config {
+            bind_addr: "127.0.0.1:8080".parse().unwrap(),
+            redis_url: "redis://127.0.0.1:6379".to_string(),
+            database_url: "mysql://localhost/predictiq".to_string(),
+            hmac_key: "secret".to_string(),
+            hmac_key_previous: None,
+            hmac_key_rotation_grace_seconds: 3600,
+            db_pool: DbPoolConfig {
+                min_connections: 5,
+                max_connections: 25,
+                acquire_timeout: Duration::from_secs(5),
+                idle_timeout: None,
+                max_lifetime: None,
+                query_timeout: Duration::from_secs(30),
+            },
+            blockchain_rpc_url: "https://testnet.soroban.org".to_string(),
+            blockchain_network: BlockchainNetwork::Testnet,
+            contract_id: "contract_id".to_string(),
+            retry_attempts: 3,
+            retry_base_delay_ms: 200,
+            event_poll_interval: Duration::from_secs(5),
+            tx_poll_interval: Duration::from_secs(4),
+            confirmation_ledger_lag: 3,
+            sync_market_ids: vec![],
+            featured_limit: 10,
+            content_default_page_size: 20,
+            sendgrid_api_key: None,
+            from_email: None,
+            base_url: "http://localhost:8080".to_string(),
+            api_keys: vec![],
+            admin_whitelist_ips: vec![],
+            trust_proxy: true,
+            request_signing_secret: None,
+            sendgrid_webhook_secret: None,
+            webhook_replay_window_secs: 300,
+            trusted_proxy_cidrs: vec![],
+            metrics_public: false,
+            metrics_allowlist_ips: vec![],
+            otlp_endpoint: None,
+            trace_sample_rate: 0.1,
+            idempotency_window_secs: 86400,
+            newsletter_token_ttl_secs: 86400,
+            gdpr_export_rate_limit: 3,
+            gdpr_export_rate_window_secs: 3600,
+            newsletter_rate_limit_max: 5,
+            newsletter_rate_limit_window_secs: 3600,
+            email_stale_job_threshold_secs: 3600,
+            unsubscribe_signing_secret: None,
+            cors: CorsConfig {
+                dev_mode: false,
+                allowed_origins: vec![],
+                allowed_methods: vec!["GET".to_string()],
+                allowed_headers: vec!["content-type".to_string()],
+                allow_credentials: false,
+                max_age_secs: 3600,
+            },
+            contract_key_schema: ContractKeySchema {
+                version: "1.0.0".to_string(),
+                market: "market:{id}".to_string(),
+                platform_stats: "platform:stats".to_string(),
+                user_bets: "user_bets:{id}".to_string(),
+                oracle_result: "oracle_result:{id}".to_string(),
+                health_check: "platform:stats".to_string(),
+            },
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validate_malformed_redis_url() {
+        let config = Config {
+            bind_addr: "127.0.0.1:8080".parse().unwrap(),
+            redis_url: "memcached://127.0.0.1:11211".to_string(),
+            database_url: "postgres://postgres@localhost/predictiq".to_string(),
+            hmac_key: "secret".to_string(),
+            hmac_key_previous: None,
+            hmac_key_rotation_grace_seconds: 3600,
+            db_pool: DbPoolConfig {
+                min_connections: 5,
+                max_connections: 25,
+                acquire_timeout: Duration::from_secs(5),
+                idle_timeout: None,
+                max_lifetime: None,
+                query_timeout: Duration::from_secs(30),
+            },
+            blockchain_rpc_url: "https://testnet.soroban.org".to_string(),
+            blockchain_network: BlockchainNetwork::Testnet,
+            contract_id: "contract_id".to_string(),
+            retry_attempts: 3,
+            retry_base_delay_ms: 200,
+            event_poll_interval: Duration::from_secs(5),
+            tx_poll_interval: Duration::from_secs(4),
+            confirmation_ledger_lag: 3,
+            sync_market_ids: vec![],
+            featured_limit: 10,
+            content_default_page_size: 20,
+            sendgrid_api_key: None,
+            from_email: None,
+            base_url: "http://localhost:8080".to_string(),
+            api_keys: vec![],
+            admin_whitelist_ips: vec![],
+            trust_proxy: true,
+            request_signing_secret: None,
+            sendgrid_webhook_secret: None,
+            webhook_replay_window_secs: 300,
+            trusted_proxy_cidrs: vec![],
+            metrics_public: false,
+            metrics_allowlist_ips: vec![],
+            otlp_endpoint: None,
+            trace_sample_rate: 0.1,
+            idempotency_window_secs: 86400,
+            newsletter_token_ttl_secs: 86400,
+            gdpr_export_rate_limit: 3,
+            gdpr_export_rate_window_secs: 3600,
+            newsletter_rate_limit_max: 5,
+            newsletter_rate_limit_window_secs: 3600,
+            email_stale_job_threshold_secs: 3600,
+            unsubscribe_signing_secret: None,
+            cors: CorsConfig {
+                dev_mode: false,
+                allowed_origins: vec![],
+                allowed_methods: vec!["GET".to_string()],
+                allowed_headers: vec!["content-type".to_string()],
+                allow_credentials: false,
+                max_age_secs: 3600,
+            },
+            contract_key_schema: ContractKeySchema {
+                version: "1.0.0".to_string(),
+                market: "market:{id}".to_string(),
+                platform_stats: "platform:stats".to_string(),
+                user_bets: "user_bets:{id}".to_string(),
+                oracle_result: "oracle_result:{id}".to_string(),
+                health_check: "platform:stats".to_string(),
+            },
+        };
+        assert!(config.validate().is_err());
     }
 }
