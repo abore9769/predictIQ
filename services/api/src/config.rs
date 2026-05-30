@@ -142,6 +142,13 @@ pub struct DbPoolConfig {
     /// Per-query execution timeout. Queries that exceed this are cancelled and
     /// return an error. Configured via `DB_QUERY_TIMEOUT_SECS` (default: 30).
     pub query_timeout: Duration,
+    /// PostgreSQL `statement_timeout` set on every connection via `after_connect`.
+    /// Prevents runaway queries from holding connections indefinitely.
+    /// Configured via `DB_STATEMENT_TIMEOUT_MS` (default: 30000 ms).
+    pub statement_timeout_ms: u64,
+    /// PostgreSQL `lock_timeout` set on every connection via `after_connect`.
+    /// Prevents lock-contention hangs. Configured via `DB_LOCK_TIMEOUT_MS` (default: 10000 ms).
+    pub lock_timeout_ms: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -295,6 +302,14 @@ impl Config {
                         .unwrap_or(30)
                         .max(1),
                 ),
+                statement_timeout_ms: env::var("DB_STATEMENT_TIMEOUT_MS")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(30_000),
+                lock_timeout_ms: env::var("DB_LOCK_TIMEOUT_MS")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(10_000),
             },
             blockchain_rpc_url,
             blockchain_network,

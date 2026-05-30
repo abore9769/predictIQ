@@ -104,10 +104,24 @@ impl Database {
         metrics: Metrics,
         pool_config: &crate::config::DbPoolConfig,
     ) -> anyhow::Result<Self> {
+        let stmt_timeout_ms = pool_config.statement_timeout_ms;
+        let lock_timeout_ms = pool_config.lock_timeout_ms;
+
         let mut builder = PgPoolOptions::new()
             .max_connections(pool_config.max_connections)
             .min_connections(pool_config.min_connections)
-            .acquire_timeout(pool_config.acquire_timeout);
+            .acquire_timeout(pool_config.acquire_timeout)
+            .after_connect(move |conn, _meta| {
+                Box::pin(async move {
+                    sqlx::query(&format!("SET statement_timeout = {stmt_timeout_ms}"))
+                        .execute(&mut *conn)
+                        .await?;
+                    sqlx::query(&format!("SET lock_timeout = {lock_timeout_ms}"))
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            });
 
         if let Some(idle) = pool_config.idle_timeout {
             builder = builder.idle_timeout(idle);
