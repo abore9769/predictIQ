@@ -150,4 +150,6 @@ pub enum ErrorCode {
 
     /// The provided deadline is in the past or otherwise invalid.
     InvalidDeadline = 148,
+    PendingTransferNotFound = 149,
+    NotPendingOwner = 150,
 }
