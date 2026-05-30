@@ -1,31 +1,22 @@
-use axum::{
-    body::Body,
-    extract::Request,
-    http::StatusCode,
-    middleware::Next,
-    response::{IntoResponse, Response},
-    Json,
-};
+//! Input validation and sanitization for predictIQ API.
+//!
+//! ## XSS prevention
+//! String fields are sanitized before storage using an allowlist-based approach:
+//! - HTML tags are stripped entirely
+//! - Script / event-handler patterns are rejected outright
+//! - Null bytes and control characters are removed
+//!
+//! This is a defence-in-depth layer; the frontend MUST also escape output.
+
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use serde::Serialize;
 
-use crate::security::sanitize;
-
-/// Default request body size limit: 1 MiB.
-///
-/// Override at runtime with the `REQUEST_BODY_MAX_BYTES` environment variable.
-/// The value must be a positive integer (bytes).  Zero and non-numeric values
-/// fall back to this default.
-///
-/// ```text
-/// REQUEST_BODY_MAX_BYTES=524288   # 512 KiB
-/// REQUEST_BODY_MAX_BYTES=2097152  # 2 MiB
-/// ```
-pub const DEFAULT_REQUEST_BODY_MAX_BYTES: usize = 1_048_576; // 1 MiB
-const REQUEST_BODY_MAX_BYTES_ENV: &str = "REQUEST_BODY_MAX_BYTES";
-
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ValidationError {
-    pub error: String,
+    pub error:   &'static str,
+    pub field:   String,
     pub message: String,
 }
 
@@ -35,276 +26,185 @@ impl IntoResponse for ValidationError {
     }
 }
 
-pub fn parse_request_body_max_bytes(raw: Option<&str>) -> usize {
-    raw.and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|bytes| *bytes > 0)
-        .unwrap_or(DEFAULT_REQUEST_BODY_MAX_BYTES)
+static REJECT_PATTERNS: &[&str] = &[
+    "<script",
+    "</script",
+    "javascript:",
+    "vbscript:",
+    "data:text/html",
+    "on error=",
+    "onerror=",
+    "onload=",
+    "onclick=",
+    "onmouseover=",
+    "onfocus=",
+    "expression(",
+    "&#",
+    "&lt;script",
+];
+
+fn contains_injection(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    REJECT_PATTERNS.iter().any(|pat| lower.contains(pat))
 }
 
-pub fn request_body_max_bytes_from_env() -> usize {
-    parse_request_body_max_bytes(std::env::var(REQUEST_BODY_MAX_BYTES_ENV).ok().as_deref())
-}
+pub fn strip_html_tags(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut in_tag = false;
 
-/// Request validation middleware — applied globally to all routes.
-///
-/// Rejects requests with `400 Bad Request` when:
-/// - Query string or path contains SQL injection patterns (detected via [`sanitize::contains_sql_injection`])
-/// - Query string exceeds 2 048 characters
-/// - Path contains `..` (directory traversal) or `//` (double-slash)
-///
-/// Safe traffic passes through unmodified.
-pub async fn request_validation_middleware(
-    request: Request,
-    next: Next,
-) -> Result<Response, ValidationError> {
-    // Extract and validate query parameters
-    let uri = request.uri();
-    let query = uri.query().unwrap_or("");
-
-    // Check for SQL injection patterns in query
-    if sanitize::contains_sql_injection(query) {
-        return Err(ValidationError {
-            error: "invalid_input".to_string(),
-            message: "Invalid characters detected in request".to_string(),
-        });
-    }
-
-    // Check for excessively long query strings
-    if query.len() > 2048 {
-        return Err(ValidationError {
-            error: "invalid_input".to_string(),
-            message: "Query string too long".to_string(),
-        });
-    }
-
-    // Validate path parameters
-    let path = uri.path();
-    if sanitize::contains_sql_injection(path) {
-        return Err(ValidationError {
-            error: "invalid_input".to_string(),
-            message: "Invalid characters detected in path".to_string(),
-        });
-    }
-
-    // Check for path traversal attempts
-    if path.contains("..") || path.contains("//") {
-        return Err(ValidationError {
-            error: "invalid_input".to_string(),
-            message: "Invalid path format".to_string(),
-        });
-    }
-
-    Ok(next.run(request).await)
-}
-
-/// Content-Type validation for POST/PUT/PATCH requests on JSON endpoints.
-///
-/// Accepts `application/json` with optional parameters (e.g. `charset=utf-8`).
-/// Any other content type — or a missing header — is rejected with **415 Unsupported
-/// Media Type** so that non-JSON bodies never reach JSON handlers.
-///
-/// This middleware must be placed *before* body-parsing extractors in the layer
-/// stack so that invalid requests are short-circuited early.
-pub async fn content_type_validation_middleware(
-    request: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    let method = request.method();
-
-    // Only validate mutating methods; GET/HEAD/DELETE/OPTIONS pass through.
-    if matches!(method.as_str(), "POST" | "PUT" | "PATCH") {
-        let ct = request
-            .headers()
-            .get(axum::http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        // Accept "application/json" with any optional parameters such as
-        // "; charset=utf-8".  Everything else — including an absent header
-        // (ct == "") — is rejected with 415.
-        let mime_type = ct.split(';').next().unwrap_or("").trim();
-        if !mime_type.eq_ignore_ascii_case("application/json") {
-            return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    for ch in input.chars() {
+        match ch {
+            '<'          => { in_tag = true; }
+            '>'          => { in_tag = false; }
+            _ if !in_tag => out.push(ch),
+            _            => {}
         }
     }
-
-    Ok(next.run(request).await)
+    out
 }
 
-/// Request body size guard.
-///
-/// Enforces `REQUEST_BODY_MAX_BYTES` (default: 1 MiB) against the **actual
-/// body stream**, not just the `Content-Length` header.  This prevents both:
-///
-/// * Chunked-transfer requests that carry no `Content-Length` header.
-/// * Clients that send a small `Content-Length` but stream a larger body.
-///
-/// The `Content-Length` header is still checked first as a cheap fast-path so
-/// that obviously oversized requests are rejected before any bytes are read.
-///
-/// Returns **413 Payload Too Large** when the limit is exceeded.
-pub async fn request_size_validation_middleware(
-    request: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    let max_bytes = request_body_max_bytes_from_env();
+fn strip_control_chars(input: &str) -> String {
+    input
+        .chars()
+        .filter(|&c| c == '\t' || c == '\n' || c == '\r' || (!c.is_control() && c != '\0'))
+        .collect()
+}
 
-    // ── Fast-path: reject on Content-Length before touching the body ──────────
-    if let Some(content_length) = request.headers().get(axum::http::header::CONTENT_LENGTH) {
-        if let Ok(length_str) = content_length.to_str() {
-            if let Ok(length) = length_str.parse::<usize>() {
-                if length > max_bytes {
-                    return Err(StatusCode::PAYLOAD_TOO_LARGE);
-                }
-            }
-        }
+pub fn sanitize_string(
+    field_name: &str,
+    value: &str,
+) -> Result<String, ValidationError> {
+    if contains_injection(value) {
+        return Err(ValidationError {
+            error:   "invalid_content",
+            field:   field_name.to_string(),
+            message: format!(
+                "Field '{}' contains disallowed content (script tags or event handlers).",
+                field_name
+            ),
+        });
     }
 
-    // ── Stream guard: buffer up to max_bytes + 1 and reject on overflow ───────
-    //
-    // `axum::body::to_bytes` with a limit returns `LengthLimitError` when the
-    // body exceeds `max_bytes`, covering chunked-transfer and any body that
-    // omits or lies about `Content-Length`.  We then reconstruct the request
-    // with the buffered bytes so downstream handlers can read it normally.
-    let (parts, body) = request.into_parts();
+    let stripped = strip_html_tags(value);
+    let clean    = strip_control_chars(&stripped);
+    Ok(clean.trim().to_string())
+}
 
-    let bytes = axum::body::to_bytes(body, max_bytes)
-        .await
-        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+pub fn validate_string(
+    field_name: &str,
+    value: &str,
+    min_len: usize,
+    max_len: usize,
+) -> Result<String, ValidationError> {
+    let sanitized = sanitize_string(field_name, value)?;
 
-    let request = Request::from_parts(parts, Body::from(bytes));
-    Ok(next.run(request).await)
+    if sanitized.len() < min_len {
+        return Err(ValidationError {
+            error:   "too_short",
+            field:   field_name.to_string(),
+            message: format!(
+                "Field '{}' must be at least {} characters (got {}).",
+                field_name, min_len, sanitized.len()
+            ),
+        });
+    }
+
+    if sanitized.len() > max_len {
+        return Err(ValidationError {
+            error:   "too_long",
+            field:   field_name.to_string(),
+            message: format!(
+                "Field '{}' must not exceed {} characters (got {}).",
+                field_name, max_len, sanitized.len()
+            ),
+        });
+    }
+
+    Ok(sanitized)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::Body, http::Request, middleware, routing::get, Router};
-    use tower::ServiceExt;
 
-    async fn validation_app() -> Router {
-        Router::new()
-            .route("/api/v1/items/:id", get(|| async { "ok" }))
-            .layer(middleware::from_fn(request_validation_middleware))
+    #[test]
+    fn strip_removes_simple_tags() {
+        assert_eq!(strip_html_tags("<b>hello</b>"), "hello");
     }
 
-    // ── request_validation_middleware ─────────────────────────────────────
-
-    #[tokio::test]
-    async fn allows_clean_request() {
-        let response = validation_app()
-            .await
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/items/42?sort=asc")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+    #[test]
+    fn strip_preserves_plain_text() {
+        let s = "Market closes at 3 PM on Friday.";
+        assert_eq!(strip_html_tags(s), s);
     }
 
-    #[tokio::test]
-    async fn blocks_sql_injection_in_query() {
-        let response = validation_app()
-            .await
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/items/42?id=1%20OR%201%3D1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    #[test]
+    fn detects_script_tag() {
+        assert!(contains_injection("<script>alert(1)</script>"));
     }
 
-    #[tokio::test]
-    async fn blocks_sql_injection_in_path() {
-        let response = validation_app()
-            .await
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/items/1%20UNION%20SELECT%201")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    #[test]
+    fn detects_event_handler() {
+        assert!(contains_injection(r#"<img onerror="alert(1)">"#));
     }
 
-    #[tokio::test]
-    async fn blocks_path_traversal() {
-        let response = validation_app()
-            .await
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/items/../secret")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    #[test]
+    fn detects_javascript_protocol() {
+        assert!(contains_injection("javascript:void(0)"));
     }
 
-    #[tokio::test]
-    async fn blocks_query_string_too_long() {
-        let long_query = "a=".to_string() + &"x".repeat(2048);
-        let uri = format!("/api/v1/items/1?{long_query}");
-        let response = validation_app()
-            .await
-            .oneshot(
-                Request::builder()
-                    .uri(uri)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    #[test]
+    fn clean_input_passes() {
+        assert!(!contains_injection("Will the S&P 500 close above 5000?"));
     }
 
-    // ── request_size_validation_middleware ────────────────────────────────
-
-    #[tokio::test]
-    async fn allows_request_within_size_limit() {
-        let app = Router::new()
-            .route("/", get(|| async { "ok" }))
-            .layer(middleware::from_fn(request_size_validation_middleware));
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/")
-                    .header("content-length", "100")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+    #[test]
+    fn sanitize_rejects_script_tags() {
+        let err = sanitize_string("title", "<script>evil()</script>").unwrap_err();
+        assert_eq!(err.error, "invalid_content");
+        assert_eq!(err.field, "title");
     }
 
-    #[tokio::test]
-    async fn blocks_request_exceeding_size_limit() {
-        let app = Router::new()
-            .route("/", get(|| async { "ok" }))
-            .layer(middleware::from_fn(request_size_validation_middleware));
+    #[test]
+    fn sanitize_strips_html_from_clean_html() {
+        let result = sanitize_string("title", "<b>Bold Market</b>").unwrap();
+        assert_eq!(result, "Bold Market");
+    }
 
-        let over_limit = DEFAULT_REQUEST_BODY_MAX_BYTES + 1;
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/")
-                    .header("content-length", over_limit.to_string())
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    #[test]
+    fn sanitize_strips_null_bytes() {
+        let result = sanitize_string("title", "Hello\0World").unwrap();
+        assert!(!result.contains('\0'));
+    }
+
+    #[test]
+    fn sanitize_trims_whitespace() {
+        let result = sanitize_string("title", "  trimmed  ").unwrap();
+        assert_eq!(result, "trimmed");
+    }
+
+    #[test]
+    fn validate_rejects_too_short() {
+        let err = validate_string("title", "hi", 5, 100).unwrap_err();
+        assert_eq!(err.error, "too_short");
+    }
+
+    #[test]
+    fn validate_rejects_too_long() {
+        let long = "x".repeat(101);
+        let err = validate_string("title", &long, 1, 100).unwrap_err();
+        assert_eq!(err.error, "too_long");
+    }
+
+    #[test]
+    fn validate_accepts_valid_input() {
+        let result = validate_string("title", "Will BTC hit 100k?", 5, 200).unwrap();
+        assert_eq!(result, "Will BTC hit 100k?");
+    }
+
+    #[test]
+    fn validate_rejects_encoded_script_tag() {
+        let err = validate_string("desc", "&lt;script&gt;", 1, 200).unwrap_err();
+        assert_eq!(err.error, "invalid_content");
     }
 }

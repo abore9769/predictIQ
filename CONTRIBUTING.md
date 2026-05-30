@@ -156,6 +156,57 @@ npm test              # unit tests (Jest)
 npm run test:e2e      # end-to-end tests (Playwright)
 ```
 
+### Visual Regression Tests
+
+Visual regression tests use Playwright snapshots to detect unintended UI changes. Baseline screenshots are stored in Git LFS to keep the repository size manageable.
+
+#### Baseline Screenshot Storage
+
+Baseline screenshot files are configured in `.gitattributes` to be tracked by Git LFS:
+
+```
+frontend/e2e/**/__snapshots__/*.png filter=lfs diff=lfs merge=lfs -text
+```
+
+Before running visual regression tests locally, ensure Git LFS is installed:
+
+```bash
+# Install Git LFS (macOS)
+brew install git-lfs
+git lfs install
+
+# Or on Linux
+sudo apt-get install git-lfs
+git lfs install
+```
+
+#### Updating Baselines Locally
+
+When UI changes are intentional and tests fail due to new screenshots, update baselines:
+
+```bash
+cd frontend
+npx playwright test --update-snapshots
+```
+
+This command captures new baseline screenshots. Commit the updated baselines via Git LFS:
+
+```bash
+git add frontend/e2e/**/__snapshots__/
+git commit -m "test: update visual regression baselines"
+```
+
+#### Visual Diff Threshold
+
+The visual regression tests use a configurable diff threshold (default: 0.1%) to prevent flakiness from minor pixel differences. Configure the threshold via the `VISUAL_DIFF_THRESHOLD` environment variable:
+
+```bash
+# Run with custom threshold (e.g., 0.2%)
+VISUAL_DIFF_THRESHOLD=0.2 npm run test:e2e
+```
+
+In CI, the threshold is enforced automatically. Tests fail if the pixel diff exceeds the configured threshold.
+
 ### TTS Service
 
 ```bash
