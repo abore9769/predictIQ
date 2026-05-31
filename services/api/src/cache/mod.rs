@@ -12,7 +12,6 @@ use deadpool_redis::{Config as PoolConfig, Pool, Runtime};
 use redis::AsyncCommands;
 use serde::{de::DeserializeOwned, Serialize};
 
-// ── Circuit breaker ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircuitState {
