@@ -1,74 +1,94 @@
-# i18n Guide
+# Frontend Internationalization (i18n) Guide
 
 ## Overview
 
-`src/lib/i18n.ts` provides a lightweight, dependency-free i18n utility for the PredictIQ frontend.
+PredictIQ frontend supports multiple languages through a simple i18n system. Currently supported locales:
+- **en** - English (default)
+- **es** - Spanish
+- **fr** - French
+- **de** - German
 
-## Locale Resolution
+## Adding Translations
 
-When a locale is requested the library resolves it in this order:
+### 1. Add Translation Keys
 
-1. **Exact match** — `pt-BR` → uses `pt-BR` bundle if registered.
-2. **Language subtag** — `pt-BR` → falls back to `pt` bundle.
-3. **Hard fallback** — always falls back to `en`.
+Edit `frontend/src/lib/i18n.ts` and add your translation strings to the `translations` object:
 
-No errors are thrown for unsupported locales; the caller always receives a string.
-
-## Usage
-
-```ts
-import { t, detectLocale, resolveLocale } from '@/lib/i18n';
-
-// Auto-detect from navigator.language
-const label = t('nav.features');
-
-// Explicit locale
-const label = t('nav.features', 'fr');
-
-// Resolve what locale would actually be used
-const locale = resolveLocale('zh-TW'); // → 'zh' or 'en'
+```typescript
+const translations: LocaleData = {
+  en: {
+    mySection: {
+      myKey: 'English text',
+    },
+  },
+};
 ```
 
-## Adding a New Locale
+### 2. Use in Components
 
-```ts
-import { registerTranslations } from '@/lib/i18n';
+Import and use the `useI18n` hook:
 
-registerTranslations('fr', {
-  'nav.features': 'Fonctionnalités',
-  'hero.title': 'Marchés de prédiction décentralisés',
-});
+```typescript
+import { useI18n } from '../lib/hooks/useI18n';
+
+export function MyComponent() {
+  const { t } = useI18n();
+  
+  return <h1>{t('mySection.myKey')}</h1>;
+}
 ```
 
-Call `registerTranslations` before any `t()` calls for that locale (e.g. in a layout component or route loader).
+### 3. Language Selector
 
-## Missing Keys
+Users can change language via the language selector in the header. The selection is persisted to localStorage.
 
-| Environment | Behaviour |
-|-------------|-----------|
-| `development` | `console.warn` + returns the key string |
-| `production` | returns the key string silently |
+## Adding a New Language
 
-This means the UI never crashes or renders `undefined` — worst case it shows the raw key, which is a visible signal during development.
+1. Add translations to `frontend/src/lib/i18n.ts`:
 
-## Adding Translation Keys
-
-All keys live in the `translations` object in `i18n.ts`. Use dot-notation namespacing:
-
+```typescript
+const translations: LocaleData = {
+  en: { /* ... */ },
+  pt: {  // Portuguese
+    nav: {
+      features: 'Recursos',
+      // ... add all keys
+    },
+  },
+};
 ```
-nav.*        Navigation labels
-hero.*       Hero section copy
-newsletter.* Newsletter form copy
-form.*       Generic form validation messages
-```
+
+2. The new locale will automatically appear in the language selector.
+
+## Translation Keys Structure
+
+Keys follow a hierarchical dot-notation pattern:
+- `nav.features` - Navigation features link
+- `hero.title` - Hero section title
+- `features.decentralized.title` - Feature card title
 
 ## Testing
 
-Unit tests live in `src/lib/__tests__/i18n.test.ts` and cover:
+Run i18n tests:
 
-- Exact locale match
-- Language-subtag fallback (`pt-BR` → `pt`)
-- Unknown locale fallback to `en`
-- Missing key warning in development
-- Missing key silent in production
-- `registerTranslations` merging
+```bash
+npm run test -- i18n.test.ts
+```
+
+## Best Practices
+
+1. **Keep keys organized** - Group related translations by section
+2. **Use descriptive names** - Make key names self-documenting
+3. **Avoid hardcoded strings** - Always use `t()` for user-facing text
+4. **Provide defaults** - Use `t('key', 'default')` for fallback values
+5. **Test all locales** - Verify translations work in all supported languages
+
+## Locale Persistence
+
+User's language preference is automatically saved to localStorage and restored on next visit.
+
+## Fallback Behavior
+
+- If a translation key is missing, the key itself is returned
+- If a default value is provided, it's returned instead
+- English is the default locale if no preference is stored

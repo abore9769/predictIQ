@@ -1,118 +1,96 @@
-# PredictIQ API Caching Service
+# predictiq-api
 
-This service adds a multi-layer cache strategy for API responses, database query results, and blockchain RPC data.
+Rust/Axum HTTP API service for the PredictIQ platform.
 
-## Features
-
-- Redis cache-aside implementation
-- Stellar Soroban JSON-RPC integration with retry/backoff
-- Network switching support (testnet/mainnet/custom)
-- Contract query methods:
-  - Market data
-  - Platform statistics
-  - User bets
-  - Oracle results
-- Event listener/sync worker with transaction monitoring
-- Reorg-aware synchronization using confirmation lag and cursor tracking
-- Cache layers:
-  - API response cache (`api:v1:*`)
-  - DB query cache (`dbq:v1:*`)
-  - Blockchain data cache (`chain:v1:*`)
-- Endpoint TTLs:
-  - `/api/statistics`: 5 minutes
-  - `/api/markets/featured`: 2 minutes
-  - `/api/content`: 1 hour
-- Cache warming on startup (statistics + featured markets)
-- Invalidation endpoint for write flows (`POST /api/markets/:market_id/resolve`)
-- Prometheus metrics at `/metrics` for cache hit/miss and latency
-- PostgreSQL connection pooling (min 5 / max 25)
-- Paginated content endpoint (`page`, `page_size`)
-
-## Environment Variables
-
-- `API_BIND_ADDR` (default: `0.0.0.0:8080`)
-- `REDIS_URL` (default: `redis://127.0.0.1:6379`)
-- `DATABASE_URL` (default: `postgres://postgres:postgres@127.0.0.1/predictiq`)
-- `BLOCKCHAIN_NETWORK` (`testnet` | `mainnet` | `custom`, default: `testnet`)
-- `BLOCKCHAIN_RPC_URL` (optional override for network endpoint)
-- `PREDICTIQ_CONTRACT_ID` (contract identifier used for reads)
-- `RPC_RETRY_ATTEMPTS` (default: `3`)
-- `RPC_RETRY_BASE_DELAY_MS` (default: `200`)
-- `EVENT_POLL_INTERVAL_SECS` (default: `5`)
-- `TX_POLL_INTERVAL_SECS` (default: `4`)
-- `CONFIRMATION_LEDGER_LAG` (default: `3`)
-- `SYNC_MARKET_IDS` (comma-separated market IDs for background sync)
-- `FEATURED_LIMIT` (default: `10`)
-- `CONTENT_DEFAULT_PAGE_SIZE` (default: `20`)
-- `SENDGRID_API_KEY` (required for newsletter confirmation emails)
-- `FROM_EMAIL` (sender address for newsletter confirmation emails)
-- `BASE_URL` (default: `http://localhost:8080`, used in confirmation links)
-
-## Key Naming Convention
-
-- API keys: `api:v1:<resource>`
-- DB keys: `dbq:v1:<query-shape>`
-- Chain keys: `chain:v1:<entity>`
-
-Examples:
-
-- `api:v1:statistics`
-- `api:v1:featured_markets`
-- `api:v1:content:page:1:size:20`
-- `dbq:v1:featured_markets:limit:10`
-- `chain:v1:market:42`
-
-## Run
+## Running
 
 ```bash
 cargo run -p predictiq-api
 ```
 
-## Database Migrations and Seeds
-
-Issue #13 schema and seed scripts are in:
-
-- `services/api/database/migrations`
-- `services/api/database/seeds`
-
-Apply migrations:
+## Running Tests
 
 ```bash
-for f in services/api/database/migrations/*.sql; do
-  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
-done
+# All tests (unit + integration)
+cargo test -p predictiq-api
+
+# Integration tests only
+cargo test -p predictiq-api --test integration_test
+
+# Security / unit tests
+cargo test -p predictiq-api --test security_tests
+
+# Single-run (no watch mode)
+cargo test -p predictiq-api -- --nocapture
 ```
 
-Run seeds:
+## Environment Variables
 
-```bash
-for f in services/api/database/seeds/*.sql; do
-  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
-done
-```
+| Variable | Default | Description |
+|---|---|---|
+| `API_BIND_ADDR` | `0.0.0.0:8080` | TCP address to listen on |
+| `DATABASE_URL` | `postgres://postgres:postgres@127.0.0.1/predictiq` | PostgreSQL connection string |
+| `REDIS_URL` | `redis://127.0.0.1:6379` | Redis connection string |
+| `DB_POOL_MIN_CONNECTIONS` | `5` | Minimum pool connections |
+| `DB_POOL_MAX_CONNECTIONS` | `25` | Maximum pool connections |
+| `DB_POOL_ACQUIRE_TIMEOUT_SECS` | `5` | Seconds to wait for a free connection |
+| `DB_POOL_IDLE_TIMEOUT_SECS` | _(sqlx default)_ | Seconds before idle connections are reaped |
+| `DB_POOL_MAX_LIFETIME_SECS` | _(sqlx default)_ | Max lifetime of a connection |
+| `DB_QUERY_TIMEOUT_SECS` | `30` | Per-query execution timeout |
+| `DB_STATEMENT_TIMEOUT_MS` | `30000` | PostgreSQL `statement_timeout` per connection (ms) |
+| `DB_LOCK_TIMEOUT_MS` | `10000` | PostgreSQL `lock_timeout` per connection (ms) |
 
-## Blockchain Endpoints
+### Recommended production pool settings
 
-- `GET /api/blockchain/health`
-- `GET /api/blockchain/stats`
-- `GET /api/blockchain/markets/:market_id`
-- `GET /api/blockchain/users/:user/bets?page=1&page_size=20`
-- `GET /api/blockchain/oracle/:market_id`
-- `GET /api/blockchain/tx/:tx_hash` (also registers hash for ongoing monitor polling)
+| Scenario | `MIN` | `MAX` | `ACQUIRE_TIMEOUT` | `IDLE_TIMEOUT` | `MAX_LIFETIME` |
+|---|---|---|---|---|---|
+| Low traffic / staging | `2` | `10` | `5s` | `300s` | `1800s` |
+| Standard production | `5` | `25` | `5s` | `600s` | `1800s` |
+| High-throughput production | `10` | `50` | `10s` | `600s` | `3600s` |
 
-## Newsletter Endpoints
+Rule of thumb: `MAX` ≤ PostgreSQL `max_connections` minus connections reserved for migrations, pg_bouncer, and maintenance sessions.
 
-- `POST /api/v1/newsletter/subscribe` body: `{ "email": "user@example.com", "source": "direct" }`
-- `GET /api/v1/newsletter/confirm?token=<token>`
-- `DELETE /api/v1/newsletter/unsubscribe` body: `{ "email": "user@example.com" }`
-- `GET /api/v1/newsletter/gdpr/export?email=user@example.com`
-- `DELETE /api/v1/newsletter/gdpr/delete` body: `{ "email": "user@example.com" }`
+### Pool metrics
 
-The subscribe endpoint applies an in-memory per-IP limit of 5 attempts per 15 minutes.
+The following Prometheus gauges are exported on `/metrics` and updated on each scrape:
 
-Before using newsletter endpoints, apply [`sql/newsletter_schema.sql`](./sql/newsletter_schema.sql) to your database.
+| Metric | Description |
+|---|---|
+| `db_pool_size` | Total connections in the pool (idle + active) |
+| `db_pool_idle` | Idle connections waiting for work |
+| `db_pool_active` | Connections currently executing a query |
+| `BLOCKCHAIN_RPC_URL` | testnet default | Soroban RPC endpoint |
+| `PREDICTIQ_CONTRACT_ID` | `predictiq_contract` | On-chain contract ID |
+| `API_KEYS` | _(none)_ | Comma-separated admin API keys |
+| `ADMIN_WHITELIST_IPS` | _(none)_ | Comma-separated IPs allowed to hit admin routes |
+| `TRUST_PROXY` | `true` | Trust `X-Forwarded-For` header |
+| `METRICS_PUBLIC` | `false` | Expose `/metrics` without auth |
+| `HMAC_KEY` | _(required)_ | Current HMAC secret key for signing tokens |
+| `HMAC_KEY_PREVIOUS` | _(none)_ | Previous HMAC key for zero-downtime key rotation |
+| `HMAC_KEY_ROTATION_GRACE_SECONDS` | `3600` | Grace period (seconds) for accepting tokens signed with the previous key |
 
-## Notes
+See `DATABASE.md` for database-specific configuration.
 
-- `getContractData` key shapes are currently convention-based (`market:<id>`, `platform:stats`, etc.). Align them to your deployed contract storage schema.
-- `del_by_pattern` currently uses `KEYS` for clarity. For large production datasets, switch to a `SCAN` cursor strategy.
+## HMAC Key Rotation
+
+To rotate the HMAC key without downtime:
+
+1. **Generate a new key** and set it as `HMAC_KEY_PREVIOUS`:
+   ```bash
+   export HMAC_KEY_PREVIOUS="<current-value-of-HMAC_KEY>"
+   ```
+   Deploy the API with this change. Tokens signed with both keys are now accepted.
+
+2. **Promote the new key** by setting the new key as `HMAC_KEY` and clearing `HMAC_KEY_PREVIOUS`:
+   ```bash
+   export HMAC_KEY="<new-key-value>"
+   unset HMAC_KEY_PREVIOUS  # or set to empty
+   ```
+   Deploy the API. All future tokens are signed with the new key.
+
+3. **Grace period**: By default, tokens signed with `HMAC_KEY_PREVIOUS` are accepted for 3600 seconds (1 hour). Adjust with `HMAC_KEY_ROTATION_GRACE_SECONDS` if needed. Tokens beyond the grace period are rejected.
+
+**Example timeline**:
+- 12:00 PM: Deploy with `HMAC_KEY_PREVIOUS` set to old key. New tokens use new key; old tokens still accepted.
+- 1:00 PM: Grace period expires. Old tokens are now rejected.
+- Deploy with `HMAC_KEY_PREVIOUS` unset to complete rotation.

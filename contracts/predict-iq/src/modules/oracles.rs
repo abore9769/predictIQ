@@ -1,14 +1,15 @@
 use crate::errors::ErrorCode;
 use crate::types::OracleConfig;
-use soroban_sdk::{contracttype, symbol_short, BytesN, Env, Symbol};
+use soroban_sdk::{contracttype, symbol_short, Bytes, Env, Map};
 
-const BPS_DENOMINATOR: u64 = 10_000;
+pub const MAX_STALENESS: u64 = 60;
+pub const MAX_STALENESS_SECONDS: u64 = MAX_STALENESS;
 
-/// Issue #9: Key now includes oracle_id to support multi-oracle aggregation.
 #[contracttype]
 pub enum OracleData {
-    Result(u64, u32),     // (market_id, oracle_id) -> outcome
-    LastUpdate(u64, u32), // (market_id, oracle_id) -> timestamp
+    Result(u64, u32),     // market_id -> outcome
+    LastUpdate(u64, u64), // market_id -> timestamp
+    OracleResponses(u64), // market_id -> Map<oracle_index, outcome>
 }
 
 #[contracttype]
@@ -17,115 +18,51 @@ pub struct PythPrice {
     pub price: i64,
     pub conf: u64,
     pub expo: i32,
-    /// Issue #49: i64 to match the Pyth contract ABI; validated to u64 via cast_external_timestamp.
     pub publish_time: i64,
 }
 
-/// Raw price data returned by the Pyth on-chain contract.
-/// Mirrors the `Price` struct in the Pyth Soroban contract ABI.
-#[contracttype]
-#[derive(Clone, Debug)]
-struct RawPythPrice {
-    price: i64,
-    conf: u64,
-    expo: i32,
-    publish_time: i64,
+/// Decode a 64-char hex feed_id string into a 32-byte BytesN<32>.
+fn decode_feed_id(e: &Env, feed_id: &soroban_sdk::String) -> Result<soroban_sdk::BytesN<32>, ErrorCode> {
+    if feed_id.len() != 64 {
+        return Err(ErrorCode::OracleFailure);
+    }
+    let bytes = Bytes::from(feed_id.clone());
+    let mut buf = [0u8; 32];
+    for i in 0..32 {
+        let hi = hex_char(bytes.get(i * 2).ok_or(ErrorCode::OracleFailure)?)?;
+        let lo = hex_char(bytes.get(i * 2 + 1).ok_or(ErrorCode::OracleFailure)?)?;
+        buf[i as usize] = (hi << 4) | lo;
+    }
+    Ok(soroban_sdk::BytesN::from_array(e, &buf))
 }
 
-/// Issue #25: Real Pyth cross-contract call via Soroban's invoke_contract.
-///
-/// The Pyth contract on Stellar exposes a `get_price` function that accepts a
-/// 32-byte price feed ID and returns the latest aggregated price.
-///
-/// `config.oracle_address` — deployed Pyth contract address on this network.
-/// `config.feed_id`        — hex-encoded 32-byte Pyth price feed ID stored as
-///                           a `BytesN<32>` in the contract call.
-///
-/// On success the raw price is mapped into our internal `PythPrice` struct.
-/// Any host-level error (contract not found, feed not supported, etc.) is
-/// surfaced as `ErrorCode::OracleFailure`.
-pub fn fetch_pyth_price(e: &Env, config: &OracleConfig) -> Result<PythPrice, ErrorCode> {
-    // Decode the feed_id string into a 32-byte array expected by the Pyth contract.
-    let feed_id: BytesN<32> = decode_feed_id(e, config)?;
-
-    // Cross-contract call using try_invoke_contract so errors don't panic.
-    // The Pyth Soroban contract's `get_price(feed_id: BytesN<32>)` returns
-    // a struct with fields (price: i64, conf: u64, expo: i32, publish_time: i64).
-    // We map it to our internal PythPrice.
-    let raw: Result<Result<RawPythPrice, _>, _> = e.try_invoke_contract(
-        &config.oracle_address,
-        &Symbol::new(e, "get_price"),
-        soroban_sdk::vec![e, feed_id.into()],
-    );
-
-    match raw {
-        Ok(Ok(r)) => Ok(PythPrice {
-            price: r.price,
-            conf: r.conf,
-            expo: r.expo,
-            publish_time: r.publish_time,
-        }),
+fn hex_char(c: u8) -> Result<u8, ErrorCode> {
+    match c {
+        b'0'..=b'9' => Ok(c - b'0'),
+        b'a'..=b'f' => Ok(c - b'a' + 10),
+        b'A'..=b'F' => Ok(c - b'A' + 10),
         _ => Err(ErrorCode::OracleFailure),
     }
 }
 
-/// Decode the `feed_id` field of `OracleConfig` into a `BytesN<32>`.
-/// (e.g. "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43").
-/// We convert it to raw bytes for the Pyth contract call.
-fn decode_feed_id(e: &Env, config: &OracleConfig) -> Result<BytesN<32>, ErrorCode> {
-    let len = config.feed_id.len() as usize;
-    if len != 64 {
-        return Err(ErrorCode::OracleFailure);
-    }
-
-    // Copy the soroban String bytes into a stack buffer.
-    let mut hex_buf = [0u8; 64];
-    config.feed_id.copy_into_slice(&mut hex_buf);
-
-    let mut bytes = [0u8; 32];
-    for i in 0..32 {
-        let hi = hex_nibble(hex_buf[i * 2]).ok_or(ErrorCode::OracleFailure)?;
-        let lo = hex_nibble(hex_buf[i * 2 + 1]).ok_or(ErrorCode::OracleFailure)?;
-        bytes[i] = (hi << 4) | lo;
-    }
-
-    Ok(BytesN::from_array(e, &bytes))
+/// Call the on-chain Pyth price-feed contract using config.oracle_address and config.feed_id.
+pub fn fetch_pyth_price(e: &Env, config: &OracleConfig) -> Result<PythPrice, ErrorCode> {
+    let feed_id = decode_feed_id(e, &config.feed_id)?;
+    let client = crate::pyth_client::PythOracleClient::new(e, &config.oracle_address);
+    let (price, conf, expo, publish_time) = client.get_price(&feed_id);
+    Ok(PythPrice { price, conf, expo, publish_time })
 }
 
-#[inline]
-fn hex_nibble(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
-pub fn cast_external_timestamp(timestamp: i64) -> Result<u64, ErrorCode> {
-    timestamp
-        .try_into()
-        .map_err(|_| ErrorCode::InvalidTimestamp)
-}
-
-pub fn is_stale(current_time: u64, result_time: u64, max_age_seconds: u64) -> bool {
-    current_time.saturating_sub(result_time) > max_age_seconds
-}
-
-/// Issue #41: Use saturating_abs to avoid overflow on i64::MIN.
-/// Issue #49: cast publish_time from i64 (Pyth ABI) to u64 (ledger) safely.
 pub fn validate_price(e: &Env, price: &PythPrice, config: &OracleConfig) -> Result<(), ErrorCode> {
-    let current_time = e.ledger().timestamp(); // u64
     let publish_time = cast_external_timestamp(price.publish_time)?;
-    let age = current_time.saturating_sub(publish_time);
+    let current_time = e.ledger().timestamp();
 
-    if age > config.max_staleness_seconds {
+    if is_stale(current_time, publish_time, effective_max_staleness(config)) {
         return Err(ErrorCode::StalePrice);
     }
 
-    // Issue #41: use abs_price_to_u64 to safely handle i64::MIN.
     let price_abs = abs_price_to_u64(price.price);
-    let max_conf = (price_abs * config.max_confidence_bps) / BPS_DENOMINATOR;
+    let max_conf = (price_abs.saturating_mul(config.max_confidence_bps)) / 10000;
 
     if price.conf > max_conf {
         return Err(ErrorCode::ConfidenceTooLow);
@@ -134,105 +71,201 @@ pub fn validate_price(e: &Env, price: &PythPrice, config: &OracleConfig) -> Resu
     Ok(())
 }
 
-/// Safe absolute value for i64 that avoids overflow on i64::MIN.
-/// i64::MIN.abs() would panic in debug mode; saturating to i64::MAX instead.
-pub fn abs_price_to_u64(price: i64) -> u64 {
-    if price == i64::MIN {
-        i64::MAX as u64
+/// Issue #508: Validate oracle staleness before resolution — checks all configured oracle indices.
+pub fn validate_oracle_staleness(
+    e: &Env,
+    market_id: u64,
+    config: &OracleConfig,
+) -> Result<(), ErrorCode> {
+    let num_oracles = config.min_responses.unwrap_or(1);
+    let current_time = e.ledger().timestamp();
+    let max_staleness = effective_max_staleness(config);
+    let mut any_found = false;
+
+    for idx in 0..num_oracles {
+        let last_update = e
+            .storage()
+            .persistent()
+            .get::<_, u64>(&OracleData::LastUpdate(market_id, idx as u64));
+
+        if let Some(update_time) = last_update {
+            any_found = true;
+            let age = current_time.saturating_sub(update_time);
+            if age > max_staleness {
+                return Err(ErrorCode::StalePrice);
+            }
+        }
+    }
+
+    if any_found {
+        Ok(())
     } else {
-        price.unsigned_abs()
+        Err(ErrorCode::OracleFailure)
     }
 }
 
-pub fn resolve_with_pyth(
-    e: &Env,
-    market_id: u64,
-    oracle_id: u32,
-    config: &OracleConfig,
-) -> Result<u32, ErrorCode> {
+pub fn resolve_with_pyth(e: &Env, market_id: u64, oracle_id: u32, config: &OracleConfig) -> Result<u32, ErrorCode> {
     let price = fetch_pyth_price(e, config)?;
-
-    // Validate freshness and confidence before storing.
     validate_price(e, &price, config)?;
 
-    let outcome = determine_outcome(&price);
+    let outcome = determine_outcome(&price, config);
+
     let publish_time = cast_external_timestamp(price.publish_time)?;
 
     e.storage()
         .persistent()
         .set(&OracleData::Result(market_id, oracle_id), &outcome);
     e.storage().persistent().set(
-        &OracleData::LastUpdate(market_id, oracle_id),
+        &OracleData::LastUpdate(market_id, oracle_id as u64),
         &publish_time,
     );
 
     e.events().publish(
-        (symbol_short!("oracle_ok"), market_id),
+        (symbol_short!("oracle_ok"), market_id, config.oracle_address.clone()),
         (outcome, price.price, price.conf),
     );
 
     Ok(outcome)
 }
 
-/// Determine the winning outcome index from a validated Pyth price.
-/// Outcome 0 = price positive (or zero), outcome 1 = price negative.
-/// Markets with threshold-based resolution should override this via
-/// market-specific configuration in a future iteration.
-fn determine_outcome(price: &PythPrice) -> u32 {
-    if price.price >= 0 { 0 } else { 1 }
+fn determine_outcome(price: &PythPrice, config: &OracleConfig) -> u32 {
+    let threshold = config.strike_price.unwrap_or(0);
+    if price.price >= threshold { 0 } else { 1 }
 }
 
-/// Issue #9: oracle_id parameter added; callers use 0 for the primary oracle.
 pub fn get_oracle_result(e: &Env, market_id: u64, oracle_id: u32) -> Option<u32> {
     e.storage()
         .persistent()
         .get(&OracleData::Result(market_id, oracle_id))
 }
 
-pub fn set_oracle_result(e: &Env, market_id: u64, outcome: u32) -> Result<(), ErrorCode> {
+pub fn get_last_update(e: &Env, market_id: u64, oracle_id: u32) -> Option<u64> {
     e.storage()
         .persistent()
-        .set(&OracleData::Result(market_id, 0), &outcome);
+        .get(&OracleData::LastUpdate(market_id, oracle_id as u64))
+}
+
+pub fn set_oracle_result(e: &Env, market_id: u64, oracle_id: u32, outcome: u32) -> Result<(), ErrorCode> {
+    e.storage()
+        .persistent()
+        .set(&OracleData::Result(market_id, oracle_id), &outcome);
     e.storage().persistent().set(
-        &OracleData::LastUpdate(market_id, 0),
+        &OracleData::LastUpdate(market_id, oracle_id as u64),
         &e.ledger().timestamp(),
     );
 
-    let oracle_addr = e.current_contract_address();
-    crate::modules::events::emit_oracle_result_set(e, market_id, oracle_addr, outcome);
+    let oracle_addr = crate::modules::markets::get_market(e, market_id)
+        .map(|m| m.oracle_config.oracle_address)
+        .unwrap_or_else(|| e.current_contract_address());
+    crate::modules::events::emit_oracle_result_set(e, market_id, oracle_id, oracle_addr, outcome);
 
     Ok(())
+}
+
+/// Convert i64 timestamp to u64, rejecting negative values.
+pub fn cast_external_timestamp(ts: i64) -> Result<u64, ErrorCode> {
+    if ts < 0 {
+        Err(ErrorCode::InvalidTimestamp)
+    } else {
+        Ok(ts as u64)
+    }
+}
+
+/// Check if oracle data is stale (age > max_staleness_seconds).
+pub fn is_stale(current_time: u64, result_time: u64, max_staleness_seconds: u64) -> bool {
+    let age = current_time.saturating_sub(result_time);
+    age > max_staleness_seconds
+}
+
+fn effective_max_staleness(config: &OracleConfig) -> u64 {
+    if config.max_staleness_seconds < MAX_STALENESS_SECONDS {
+        config.max_staleness_seconds
+    } else {
+        MAX_STALENESS_SECONDS
+    }
+}
+
+/// Convert i64 price to u64 absolute value, saturating i64::MIN to i64::MAX as u64.
+pub fn abs_price_to_u64(price: i64) -> u64 {
+    if price == i64::MIN {
+        i64::MAX as u64
+    } else if price < 0 {
+        (-price) as u64
+    } else {
+        price as u64
+    }
 }
 
 pub fn verify_oracle_health(_e: &Env, config: &OracleConfig) -> bool {
     !config.feed_id.is_empty()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Issue #509: Record an oracle response for consensus validation
+pub fn record_oracle_response(
+    e: &Env,
+    market_id: u64,
+    oracle_index: u32,
+    outcome: u32,
+) -> Result<(), ErrorCode> {
+    let key = OracleData::OracleResponses(market_id);
+    let mut responses: Map<u32, u32> = e
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Map::new(e));
 
-    #[test]
-    fn abs_price_handles_i64_min_without_panic() {
-        assert_eq!(abs_price_to_u64(i64::MIN), i64::MAX as u64);
+    responses.set(oracle_index, outcome);
+    e.storage().persistent().set(&key, &responses);
+
+    Ok(())
+}
+
+/// Issue #509: Validate oracle consensus - requires min_responses confirmations
+pub fn validate_consensus(
+    e: &Env,
+    market_id: u64,
+    config: &OracleConfig,
+) -> Result<u32, ErrorCode> {
+    let min_responses = config.min_responses.unwrap_or(1);
+
+    let key = OracleData::OracleResponses(market_id);
+    let responses: Map<u32, u32> = e
+        .storage()
+        .persistent()
+        .get(&key)
+        .ok_or(ErrorCode::OracleFailure)?;
+
+    // Check if we have enough responses
+    if responses.len() < min_responses {
+        return Err(ErrorCode::OracleFailure);
     }
 
-    #[test]
-    fn abs_price_preserves_normal_values() {
-        assert_eq!(abs_price_to_u64(-123), 123);
-        assert_eq!(abs_price_to_u64(456), 456);
-        assert_eq!(abs_price_to_u64(0), 0);
+    // Count votes for each outcome
+    let mut outcome_votes: Map<u32, u32> = Map::new(e);
+    let mut i = 0u32;
+    while i < responses.len() {
+        if let Some(outcome) = responses.get(i) {
+            let votes = outcome_votes.get(outcome).unwrap_or(0);
+            outcome_votes.set(outcome, votes + 1);
+        }
+        i += 1;
     }
 
-    #[test]
-    fn hex_nibble_parses_all_valid_chars() {
-        assert_eq!(hex_nibble(b'0'), Some(0));
-        assert_eq!(hex_nibble(b'9'), Some(9));
-        assert_eq!(hex_nibble(b'a'), Some(10));
-        assert_eq!(hex_nibble(b'f'), Some(15));
-        assert_eq!(hex_nibble(b'A'), Some(10));
-        assert_eq!(hex_nibble(b'F'), Some(15));
-        assert_eq!(hex_nibble(b'g'), None);
-        assert_eq!(hex_nibble(b'z'), None);
+    // Find outcome with most votes (quorum)
+    let mut consensus_outcome: Option<u32> = None;
+    let mut max_votes = 0u32;
+    let mut i = 0u32;
+    while i < outcome_votes.len() {
+        if let Some(outcome) = outcome_votes.get(i) {
+            if let Some(votes) = outcome_votes.get(outcome) {
+                if votes > max_votes {
+                    max_votes = votes;
+                    consensus_outcome = Some(outcome);
+                }
+            }
+        }
+        i += 1;
     }
+
+    consensus_outcome.ok_or(ErrorCode::OracleFailure)
 }

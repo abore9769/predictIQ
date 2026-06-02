@@ -1,95 +1,135 @@
 /**
- * Minimal i18n utility with graceful locale fallback.
- *
- * Resolution order:
- *   1. Requested locale
- *   2. Language-only tag (e.g. "pt" from "pt-BR")
- *   3. "en" (hard fallback)
- *
- * Missing keys:
- *   - Development: console.warn + return key
- *   - Production:  return key silently
+ * Simple i18n utility for frontend internationalization.
+ * Supports multiple locales with fallback to English.
  */
 
-export type Locale = string;
-export type TranslationMap = Record<string, string>;
-export type Translations = Record<Locale, TranslationMap>;
+export type Locale = 'en' | 'es' | 'fr' | 'de';
 
-const FALLBACK_LOCALE = 'en';
+interface Translations {
+  [key: string]: string | Translations;
+}
 
-// ---------------------------------------------------------------------------
-// Built-in translations (extend as needed)
-// ---------------------------------------------------------------------------
-const translations: Translations = {
+interface LocaleData {
+  [locale: string]: Translations;
+}
+
+const translations: LocaleData = {
   en: {
-    'nav.features': 'Features',
-    'nav.how_it_works': 'How It Works',
-    'nav.about': 'About',
-    'nav.contact': 'Contact',
-    'hero.title': 'Decentralized Prediction Markets',
-    'hero.cta': 'Get Early Access',
-    'newsletter.placeholder': 'Enter your email',
-    'newsletter.success': 'Successfully subscribed to updates!',
-    'form.email_required': 'Email is required',
-    'form.email_invalid': 'Please enter a valid email address',
+    nav: {
+      features: 'Features',
+      howItWorks: 'How It Works',
+      about: 'About',
+      contact: 'Contact',
+    },
+    hero: {
+      title: 'Decentralized Prediction Markets on Stellar',
+      description: 'Create, bet on, and resolve prediction markets with transparency, security, and fairness powered by blockchain technology.',
+      signupHeading: 'Sign up for updates',
+      emailLabel: 'Email Address',
+      emailPlaceholder: 'you@example.com',
+      emailRequired: 'Email is required',
+      emailInvalid: 'Please enter a valid email address',
+      submitButton: 'Get Early Access',
+      subscribedButton: 'Subscribed!',
+      successMessage: 'Successfully subscribed to updates!',
+    },
+    features: {
+      heading: 'Key Features',
+      decentralized: {
+        title: 'Fully Decentralized',
+        description: 'No central authority. Markets run on smart contracts with transparent, immutable rules.',
+      },
+      secure: {
+        title: 'Secure & Audited',
+        description: 'Smart contracts audited by leading security firms. Your funds are protected by battle-tested code.',
+      },
+      fast: {
+        title: 'Lightning Fast',
+        description: 'Built on Stellar for near-instant transactions and minimal fees. Trade without waiting.',
+      },
+    },
+    howItWorks: {
+      heading: 'How It Works',
+      step1: {
+        title: 'Create a Market',
+        description: 'Define outcomes and set parameters for your prediction market.',
+      },
+      step2: {
+        title: 'Place Bets',
+        description: 'Users bet on outcomes they believe will occur.',
+      },
+      step3: {
+        title: 'Oracle Resolution',
+        description: 'Trusted oracles provide real-world data to resolve markets.',
+      },
+      step4: {
+        title: 'Claim Winnings',
+        description: 'Winners automatically receive their share of the pool.',
+      },
+    },
+    about: {
+      heading: 'About PredictIQ',
+      description1: 'PredictIQ is a decentralized prediction market platform built on the Stellar blockchain. We enable anyone to create, participate in, and resolve prediction markets with complete transparency and fairness.',
+      description2: 'Our smart contracts are open-source, audited, and designed with security and user experience as top priorities.',
+    },
+    footer: {
+      title: 'PredictIQ',
+      tagline: 'Decentralized prediction markets for everyone.',
+      linksHeading: 'Links',
+      legalHeading: 'Legal',
+      documentation: 'Documentation',
+      github: 'GitHub',
+      discord: 'Discord',
+      privacy: 'Privacy Policy',
+      terms: 'Terms of Service',
+      copyright: '© 2024 PredictIQ. All rights reserved.',
+    },
   },
 };
 
-// ---------------------------------------------------------------------------
-// Supported locale resolution
-// ---------------------------------------------------------------------------
+class I18n {
+  private currentLocale: Locale = 'en';
 
-/** Returns the best available locale key for the given tag. */
-export function resolveLocale(requested: string): Locale {
-  if (translations[requested]) return requested;
-
-  // Try language-only subtag (e.g. "pt" from "pt-BR")
-  const lang = requested.split('-')[0];
-  if (lang !== requested && translations[lang]) return lang;
-
-  return FALLBACK_LOCALE;
-}
-
-/** Detects the browser's preferred locale and resolves it. */
-export function detectLocale(): Locale {
-  if (typeof navigator === 'undefined') return FALLBACK_LOCALE;
-  const preferred = navigator.language || FALLBACK_LOCALE;
-  return resolveLocale(preferred);
-}
-
-// ---------------------------------------------------------------------------
-// Translation lookup
-// ---------------------------------------------------------------------------
-
-/**
- * Returns the translation for `key` in `locale`.
- * Falls back to `en` for missing keys and warns in development.
- */
-export function t(key: string, locale: Locale = detectLocale()): string {
-  const resolved = resolveLocale(locale);
-  const map = translations[resolved] ?? translations[FALLBACK_LOCALE];
-
-  if (key in map) return map[key];
-
-  // Try the hard fallback map if we weren't already using it
-  if (resolved !== FALLBACK_LOCALE && key in translations[FALLBACK_LOCALE]) {
-    return translations[FALLBACK_LOCALE][key];
+  setLocale(locale: Locale): void {
+    if (locale in translations) {
+      this.currentLocale = locale;
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('locale', locale);
+      }
+    }
   }
 
-  if (process.env.NODE_ENV !== 'production') {
-    console.warn(`[i18n] Missing translation key "${key}" for locale "${locale}"`);
+  getLocale(): Locale {
+    return this.currentLocale;
   }
 
-  return key;
+  loadLocaleFromStorage(): void {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('locale') as Locale | null;
+      if (stored && stored in translations) {
+        this.currentLocale = stored;
+      }
+    }
+  }
+
+  t(key: string, defaultValue?: string): string {
+    const keys = key.split('.');
+    let value: any = translations[this.currentLocale];
+
+    for (const k of keys) {
+      if (value && typeof value === 'object' && k in value) {
+        value = value[k];
+      } else {
+        return defaultValue || key;
+      }
+    }
+
+    return typeof value === 'string' ? value : (defaultValue || key);
+  }
+
+  getAvailableLocales(): Locale[] {
+    return Object.keys(translations) as Locale[];
+  }
 }
 
-// ---------------------------------------------------------------------------
-// Registration helper (for lazy-loaded locale bundles)
-// ---------------------------------------------------------------------------
-
-/** Registers additional translations. Merges into existing locale maps. */
-export function registerTranslations(locale: Locale, map: TranslationMap): void {
-  translations[locale] = { ...(translations[locale] ?? {}), ...map };
-}
-
-export { translations };
+export const i18n = new I18n();

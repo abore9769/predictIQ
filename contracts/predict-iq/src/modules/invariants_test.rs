@@ -61,6 +61,7 @@ fn test_stake_conservation_after_market_creation() {
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 100,
+        strike_price: None,
     };
 
     let token = Address::generate(&env);
@@ -103,6 +104,7 @@ fn test_stake_conservation_single_bet() {
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 100,
+        strike_price: None,
     };
 
     let token = Address::generate(&env);
@@ -126,8 +128,9 @@ fn test_stake_conservation_single_bet() {
     assert_stake_conservation(&env, &client, market_id);
 
     let market = client.get_market(&market_id).unwrap();
-    assert_eq!(market.total_staked, 100);
-    assert_eq!(client.get_outcome_stake(&market_id, &0), 100);
+    // Net stored after 1% fee: 100 - 1 = 99
+    assert_eq!(market.total_staked, 99);
+    assert_eq!(client.get_outcome_stake(&market_id, &0), 99);
 }
 
 #[test]
@@ -148,6 +151,7 @@ fn test_stake_conservation_multiple_bets_same_outcome() {
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 100,
+        strike_price: None,
     };
 
     let token = Address::generate(&env);
@@ -175,8 +179,9 @@ fn test_stake_conservation_multiple_bets_same_outcome() {
     assert_stake_conservation(&env, &client, market_id);
 
     let market = client.get_market(&market_id).unwrap();
-    assert_eq!(market.total_staked, 150);
-    assert_eq!(client.get_outcome_stake(&market_id, &0), 150);
+    // Net stored after 1% fee: 100 - 1 = 99, 50 - 0 = 50 (fee truncates to 0 for small amounts)
+    assert_eq!(market.total_staked, 149);
+    assert_eq!(client.get_outcome_stake(&market_id, &0), 149);
 }
 
 #[test]
@@ -197,6 +202,7 @@ fn test_stake_conservation_multiple_bets_different_outcomes() {
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 100,
+        strike_price: None,
     };
 
     let token = Address::generate(&env);
@@ -223,8 +229,9 @@ fn test_stake_conservation_multiple_bets_different_outcomes() {
     assert_stake_conservation(&env, &client, market_id);
 
     let market = client.get_market(&market_id).unwrap();
-    assert_eq!(market.total_staked, 175);
-    assert_eq!(client.get_outcome_stake(&market_id, &0), 100);
+    // Net stored after 1% fee: 100 - 1 = 99, 75 - 0 = 75
+    assert_eq!(market.total_staked, 174);
+    assert_eq!(client.get_outcome_stake(&market_id, &0), 99);
     assert_eq!(client.get_outcome_stake(&market_id, &1), 75);
 }
 
@@ -250,6 +257,7 @@ fn test_stake_conservation_cancellation_refunds() {
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 100,
+        strike_price: None,
     };
 
     let token = Address::generate(&env);
@@ -309,6 +317,7 @@ fn test_stake_conservation_partial_refunds() {
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 100,
+        strike_price: None,
     };
 
     let token = Address::generate(&env);
@@ -343,7 +352,7 @@ fn test_stake_conservation_partial_refunds() {
 
     // Verify partial state
     let market = client.get_market(&market_id).unwrap();
-    assert_eq!(market.total_staked, 50); // bettor2's stake still there
+    assert_eq!(market.total_staked, 50); // bettor2's net stake still there (50 - 0 fee)
     assert_eq!(client.get_outcome_stake(&market_id, &0), 0);
     assert_eq!(client.get_outcome_stake(&market_id, &1), 50);
 }
@@ -366,6 +375,7 @@ fn test_stake_conservation_multiple_cancellations() {
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 100,
+        strike_price: None,
     };
 
     let token = Address::generate(&env);
@@ -431,6 +441,7 @@ fn test_stake_conservation_resolution_winner_payouts() {
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 100,
+        strike_price: None,
     };
 
     let token = Address::generate(&env);
@@ -485,6 +496,7 @@ fn test_stake_conservation_resolution_multiple_winners() {
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 100,
+        strike_price: None,
     };
 
     let token = Address::generate(&env);
@@ -548,6 +560,7 @@ fn test_stake_conservation_three_outcome_market() {
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 100,
+        strike_price: None,
     };
 
     let token = Address::generate(&env);
@@ -603,6 +616,7 @@ fn test_stake_conservation_boundary_values() {
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 100,
+        strike_price: None,
     };
 
     let token = Address::generate(&env);
@@ -665,6 +679,7 @@ fn test_stake_conservation_valid_bet_maintains_conservation() {
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 100,
+        strike_price: None,
     };
 
     let token = Address::generate(&env);
@@ -689,7 +704,8 @@ fn test_stake_conservation_valid_bet_maintains_conservation() {
 
     // Verify conservation holds
     let market = client.get_market(&market_id).unwrap();
-    assert_eq!(market.total_staked, 100);
+    // Net stored after 1% fee: 100 - 1 = 99
+    assert_eq!(market.total_staked, 99);
 }
 
 #[test]
@@ -710,6 +726,7 @@ fn test_stake_conservation_multiple_outcome_refunds() {
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 100,
+        strike_price: None,
     };
 
     let token = Address::generate(&env);
@@ -748,4 +765,124 @@ fn test_stake_conservation_multiple_outcome_refunds() {
     // Verify final state
     let market = client.get_market(&market_id).unwrap();
     assert_eq!(market.total_staked, 0);
+}
+
+// =============================================================================
+// MIGRATION INTEGRITY TESTS
+// =============================================================================
+
+#[test]
+fn test_migration_integrity_validation_passes_after_successful_migration() {
+    let env = soroban_sdk::Env::default();
+    env.mock_all_auths();
+
+    // Setup admin for migration integrity check
+    let admin = Address::generate(&env);
+    env.storage().persistent().set(&crate::types::ConfigKey::Admin, &admin);
+    env.storage().persistent().set(&crate::types::ConfigKey::GuardianSet, &admin);
+
+    // Verify integrity passes when required keys exist
+    let result = crate::modules::migration::verify_migration_integrity(&env);
+    assert!(result.unwrap_or(false));
+}
+
+#[test]
+fn test_migration_integrity_validation_fails_without_admin() {
+    let env = soroban_sdk::Env::default();
+    env.mock_all_auths();
+
+    // Clear admin key - should fail validation
+    env.storage().persistent().remove(&crate::types::ConfigKey::Admin);
+    env.storage().persistent().set(&crate::types::ConfigKey::GuardianSet, &Address::generate(&env));
+
+    let result = crate::modules::migration::verify_migration_integrity(&env);
+    assert!(!result.unwrap_or(false));
+}
+
+#[test]
+fn test_migration_rolls_back_on_validation_failure() {
+    let env = soroban_sdk::Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    env.storage().persistent().set(&crate::types::ConfigKey::Admin, &admin);
+    env.storage().persistent().set(&crate::types::ConfigKey::GuardianSet, &admin);
+
+    // Migration that removes admin key (invalidates state)
+    let result = crate::modules::migration::execute_migration(
+        &env,
+        1,
+        2,
+        |_e| {
+            _e.storage().persistent().remove(&crate::types::ConfigKey::Admin);
+            Ok(())
+        },
+    );
+
+    // Should fail due to validation failure
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), crate::errors::ErrorCode::MigrationValidationError);
+
+    // Admin key should be restored after rollback
+    assert!(env.storage().persistent().has(&crate::types::ConfigKey::Admin));
+}
+
+#[test]
+fn test_stake_invariant_maintained_after_valid_migration() {
+    let env = soroban_sdk::Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register(PredictIQ, ());
+    let client = PredictIQClient::new(&env, &contract_id);
+    client.initialize(&admin, &100);
+
+    let options = Vec::from_array(
+        &env,
+        [
+            String::from_str(&env, "Yes"),
+            String::from_str(&env, "No"),
+        ],
+    );
+
+    let oracle_config = OracleConfig {
+        oracle_address: Address::generate(&env),
+        feed_id: String::from_str(&env, "test"),
+        min_responses: Some(1),
+        max_staleness_seconds: 3600,
+        max_confidence_bps: 100,
+        strike_price: None,
+    };
+
+    let token = Address::generate(&env);
+    let bettor = Address::generate(&env);
+
+    let market_id = client.create_market(
+        &admin,
+        &String::from_str(&env, "Invariant Migration Test"),
+        &options,
+        &1000,
+        &2000,
+        &oracle_config,
+        &MarketTier::Basic,
+        &token,
+        &0,
+        &0,
+    );
+
+    // Place bets
+    client.place_bet(&bettor, &market_id, &0, &100, &token, &None);
+
+    // Verify stake invariant holds
+    assert!(crate::modules::migration::validate_stake_invariant(&env, market_id).unwrap());
+
+    // Simulate migration that preserves stake invariant
+    let backup_key = format!("migration:backup:v1");
+    env.storage().persistent().set(&backup_key, &env.ledger().timestamp());
+
+    // Migration that maintains invariant (no changes to stakes)
+    let migration_fn = |_e: &Env| Ok(());
+
+    let result = crate::modules::migration::execute_migration(&env, 1, 2, migration_fn);
+    assert!(result.is_ok());
 }

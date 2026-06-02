@@ -1,6 +1,6 @@
 use crate::errors::ErrorCode;
 use crate::types::{
-    ConfigKey, Guardian, PendingUpgrade, GOV_TTL_HIGH_THRESHOLD, GOV_TTL_LOW_THRESHOLD,
+    ConfigKey, Guardian, PendingUpgrade, TTL_HIGH_THRESHOLD, TTL_LOW_THRESHOLD,
     MAJORITY_THRESHOLD_PERCENT, TIMELOCK_DURATION, TIMELOCK_MIN_SECONDS, TIMELOCK_MAX_SECONDS,
     UPGRADE_COOLDOWN_DURATION,
 };
@@ -11,7 +11,7 @@ use soroban_sdk::{Address, BytesN, Env, Vec};
 fn bump_gov_ttl(e: &Env, key: &ConfigKey) {
     e.storage()
         .persistent()
-        .extend_ttl(key, GOV_TTL_LOW_THRESHOLD, GOV_TTL_HIGH_THRESHOLD);
+        .extend_ttl(key, TTL_LOW_THRESHOLD, TTL_HIGH_THRESHOLD);
 }
 
 /// Initialize the GuardianSet with a list of guardians and their voting power.
@@ -106,6 +106,9 @@ pub fn remove_guardian(e: &Env, address: Address) -> Result<(), ErrorCode> {
     e.storage()
         .persistent()
         .set(&ConfigKey::PendingGuardianRemoval, &pending_removal);
+    e.storage()
+        .persistent()
+        .remove(&ConfigKey::PendingGuardianRemovalPassedAt);
     bump_gov_ttl(e, &ConfigKey::PendingGuardianRemoval);
     Ok(())
 }
@@ -147,37 +150,81 @@ pub fn vote_on_guardian_removal(e: &Env, voter: Address, approve: bool) -> Resul
     let other_guardians_count = guardians.len() as u32 - 1;
     let votes_needed = (other_guardians_count * MAJORITY_THRESHOLD_PERCENT) / 100 + 1;
     
-    if pending_removal.votes_for.len() as u32 >= votes_needed {
-        // Majority reached, execute removal
-        let mut new_guardians: Vec<Guardian> = Vec::new(e);
-        for g in guardians.iter() {
-            if g.address != pending_removal.target_guardian {
-                new_guardians.push_back(g.clone());
-            }
-        }
-
-        e.storage()
-            .persistent()
-            .set(&ConfigKey::GuardianSet, &new_guardians);
-        bump_gov_ttl(e, &ConfigKey::GuardianSet);
-        
-        // Clear pending removal
-        e.storage()
-            .persistent()
-            .remove(&ConfigKey::PendingGuardianRemoval);
-    } else {
-        // Update pending removal with new vote
-        e.storage()
-            .persistent()
-            .set(&ConfigKey::PendingGuardianRemoval, &pending_removal);
-        bump_gov_ttl(e, &ConfigKey::PendingGuardianRemoval);
+    if pending_removal.votes_for.len() as u32 >= votes_needed
+        && get_guardian_removal_passed_at(e).is_none()
+    {
+        set_guardian_removal_passed_at(e);
     }
+
+    e.storage()
+        .persistent()
+        .set(&ConfigKey::PendingGuardianRemoval, &pending_removal);
+    bump_gov_ttl(e, &ConfigKey::PendingGuardianRemoval);
 
     Ok(())
 }
 
+/// Execute a passed guardian removal after the configured governance timelock.
+pub fn execute_guardian_removal(e: &Env) -> Result<(), ErrorCode> {
+    crate::modules::admin::require_admin(e)?;
+
+    let pending_removal = e.storage()
+        .persistent()
+        .get::<_, crate::types::PendingGuardianRemoval>(&ConfigKey::PendingGuardianRemoval)
+        .ok_or(ErrorCode::GuardianNotSet)?;
+
+    let passed_at = get_guardian_removal_passed_at(e).ok_or(ErrorCode::InsufficientVotes)?;
+    let current_time = e.ledger().timestamp();
+    let elapsed = current_time.saturating_sub(passed_at);
+    if elapsed < get_timelock_duration(e) {
+        return Err(ErrorCode::TimelockActive);
+    }
+
+    let guardians = get_guardians(e);
+    let mut found = false;
+    let mut new_guardians: Vec<Guardian> = Vec::new(e);
+    for g in guardians.iter() {
+        if g.address == pending_removal.target_guardian {
+            found = true;
+        } else {
+            new_guardians.push_back(g.clone());
+        }
+    }
+
+    if !found {
+        return Err(ErrorCode::GuardianNotSet);
+    }
+
+    e.storage()
+        .persistent()
+        .set(&ConfigKey::GuardianSet, &new_guardians);
+    bump_gov_ttl(e, &ConfigKey::GuardianSet);
+
+    e.storage()
+        .persistent()
+        .remove(&ConfigKey::PendingGuardianRemoval);
+    e.storage()
+        .persistent()
+        .remove(&ConfigKey::PendingGuardianRemovalPassedAt);
+
+    Ok(())
+}
+
+fn get_guardian_removal_passed_at(e: &Env) -> Option<u64> {
+    e.storage()
+        .persistent()
+        .get(&ConfigKey::PendingGuardianRemovalPassedAt)
+}
+
+fn set_guardian_removal_passed_at(e: &Env) {
+    e.storage()
+        .persistent()
+        .set(&ConfigKey::PendingGuardianRemovalPassedAt, &e.ledger().timestamp());
+    bump_gov_ttl(e, &ConfigKey::PendingGuardianRemovalPassedAt);
+}
+
 /// Initiate a contract upgrade. Requires admin authorization.
-/// Starts a 48-hour timelock and requires majority vote to execute.
+/// Creates a pending upgrade; the timelock starts when majority approval is reached.
 pub fn initiate_upgrade(e: &Env, wasm_hash: BytesN<32>) -> Result<(), ErrorCode> {
     crate::modules::admin::require_admin(e)?;
 
@@ -201,7 +248,14 @@ pub fn initiate_upgrade(e: &Env, wasm_hash: BytesN<32>) -> Result<(), ErrorCode>
     e.storage()
         .persistent()
         .set(&ConfigKey::PendingUpgrade, &pending_upgrade);
+    e.storage()
+        .persistent()
+        .remove(&ConfigKey::PendingUpgradePassedAt);
     bump_gov_ttl(e, &ConfigKey::PendingUpgrade);
+
+    let admin = crate::modules::admin::get_admin(e).unwrap_or(e.current_contract_address());
+    crate::modules::events::emit_upgrade_initiated(e, admin, wasm_hash);
+
     Ok(())
 }
 
@@ -288,10 +342,17 @@ pub fn vote_for_upgrade(e: &Env, voter: Address, vote_for: bool) -> Result<bool,
         pending_upgrade.votes_against.push_back(voter);
     }
 
+    if is_majority_met(e, &pending_upgrade) && get_upgrade_passed_at(e).is_none() {
+        set_upgrade_passed_at(e);
+    }
+
     e.storage()
         .persistent()
         .set(&ConfigKey::PendingUpgrade, &pending_upgrade);
     bump_gov_ttl(e, &ConfigKey::PendingUpgrade);
+
+    crate::modules::events::emit_upgrade_voted(e, voter, vote_for);
+
     Ok(true)
 }
 
@@ -303,7 +364,7 @@ pub fn get_timelock_duration(e: &Env) -> u64 {
         .unwrap_or(TIMELOCK_DURATION)
 }
 
-/// Issue #13: Allow Guardian majority to set a new timelock duration within [6h, 7d].
+/// Issue #13/#690: Allow admin to set a new timelock duration within [24h, 7d].
 pub fn set_timelock_duration(e: &Env, seconds: u64) -> Result<(), ErrorCode> {
     crate::modules::admin::require_admin(e)?;
     if seconds < TIMELOCK_MIN_SECONDS || seconds > TIMELOCK_MAX_SECONDS {
@@ -319,8 +380,9 @@ pub fn set_timelock_duration(e: &Env, seconds: u64) -> Result<(), ErrorCode> {
 /// Check if the configurable timelock has passed.
 pub fn is_timelock_satisfied(e: &Env) -> Result<bool, ErrorCode> {
     let pending_upgrade = get_pending_upgrade(e).ok_or(ErrorCode::UpgradeNotInitiated)?;
+    let timelock_started_at = get_upgrade_passed_at(e).unwrap_or(pending_upgrade.initiated_at);
     let current_time = e.ledger().timestamp();
-    let elapsed = current_time.saturating_sub(pending_upgrade.initiated_at);
+    let elapsed = current_time.saturating_sub(timelock_started_at);
     Ok(elapsed >= get_timelock_duration(e))
 }
 
@@ -362,7 +424,7 @@ fn is_majority_met(e: &Env, pending_upgrade: &PendingUpgrade) -> bool {
 
 /// Execute the upgrade if timelock is satisfied and majority voted in favor.
 /// This directly invokes the Soroban host upgrade function.
-pub fn execute_upgrade(e: &Env) -> Result<(), ErrorCode> {
+pub fn execute_upgrade(e: &Env) -> Result<BytesN<32>, ErrorCode> {
     // Verify timelock has passed
     if !is_timelock_satisfied(e)? {
         return Err(ErrorCode::TimelockActive);
@@ -372,9 +434,12 @@ pub fn execute_upgrade(e: &Env) -> Result<(), ErrorCode> {
 
     // Verify majority vote
     if !is_majority_met(e, &pending_upgrade) {
-        // A failed execution after the timelock is treated as a governance rejection.
         set_upgrade_rejected_at(e, &pending_upgrade.wasm_hash);
         e.storage().persistent().remove(&ConfigKey::PendingUpgrade);
+        e.storage()
+            .persistent()
+            .remove(&ConfigKey::PendingUpgradePassedAt);
+        crate::modules::events::emit_upgrade_rejected(e, pending_upgrade.wasm_hash);
         return Err(ErrorCode::InsufficientVotes);
     }
 
@@ -382,18 +447,37 @@ pub fn execute_upgrade(e: &Env) -> Result<(), ErrorCode> {
 
     // Clear pending upgrade
     e.storage().persistent().remove(&ConfigKey::PendingUpgrade);
+    e.storage()
+        .persistent()
+        .remove(&ConfigKey::PendingUpgradePassedAt);
     clear_upgrade_rejected_at(e, &wasm_hash);
 
-    // Execute host-level contract code upgrade.
-    e.deployer().update_current_contract_wasm(wasm_hash);
+    let executor = crate::modules::admin::get_admin(e).unwrap_or(e.current_contract_address());
+    crate::modules::events::emit_upgrade_executed(e, executor, wasm_hash.clone());
 
-    Ok(())
+    // Execute host-level contract code upgrade.
+    e.deployer().update_current_contract_wasm(wasm_hash.clone());
+
+    Ok(wasm_hash)
+}
+
+fn get_upgrade_passed_at(e: &Env) -> Option<u64> {
+    e.storage()
+        .persistent()
+        .get(&ConfigKey::PendingUpgradePassedAt)
+}
+
+fn set_upgrade_passed_at(e: &Env) {
+    e.storage()
+        .persistent()
+        .set(&ConfigKey::PendingUpgradePassedAt, &e.ledger().timestamp());
+    bump_gov_ttl(e, &ConfigKey::PendingUpgradePassedAt);
 }
 
 /// Get vote statistics for the pending upgrade.
-pub fn get_upgrade_votes(e: &Env) -> Result<crate::types::UpgradeStats, ErrorCode> {
+pub fn get_upgrade_votes(e: &Env) -> Result<crate::types::UpgradeVoteStats, ErrorCode> {
     let pending_upgrade = get_pending_upgrade(e).ok_or(ErrorCode::UpgradeNotInitiated)?;
-    Ok(crate::types::UpgradeStats {
+    Ok(crate::types::UpgradeVoteStats {
         votes_for: pending_upgrade.votes_for.len() as u32,
         votes_against: pending_upgrade.votes_against.len() as u32,
     })

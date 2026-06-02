@@ -8,7 +8,7 @@ pub fn setup() -> (Env, PredictIQClient<'static>, Address) {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, PredictIQ);
+    let contract_id = env.register(PredictIQ, ());
     let client = PredictIQClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -44,6 +44,9 @@ pub fn create_market(
         oracle_address: Address::generate(env),
         feed_id: String::from_str(env, "test_feed"),
         min_responses: Some(1),
+        max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
+        strike_price: None,
     };
 
     client.create_market(
@@ -81,6 +84,9 @@ pub fn create_custom_market(
         oracle_address: Address::generate(env),
         feed_id: String::from_str(env, "test_feed"),
         min_responses: Some(1),
+        max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
+        strike_price: None,
     };
 
     client.create_market(

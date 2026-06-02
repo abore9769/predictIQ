@@ -2,11 +2,31 @@ openapi: 3.0.3
 info:
   title: PredictIQ API
   version: 1.0.0
-  description: REST API for the PredictIQ prediction markets platform
+  description: |
+    REST API for the PredictIQ prediction markets platform.
+
+    ## API Versioning
+
+    The API uses URL path versioning (`/api/v1/`). The current stable version is **v1**.
+
+    Clients may also send an `API-Version` header (e.g. `API-Version: v1`) to explicitly
+    declare the version they target. If omitted, the server defaults to the current version.
+
+    ## Deprecation Policy
+
+    When a version is deprecated:
+    - Responses will include a `Deprecation` header set to `true`.
+    - A `Sunset` header will indicate the date after which the version will be removed.
+    - A `Link` header will point to migration documentation.
+
+    Clients should monitor these headers and migrate before the sunset date.
+
+    Deprecated versions are supported for a minimum of **12 months** after the deprecation
+    announcement before being removed.
 
 servers:
-  - url: http://localhost:3001
-    description: Local development
+  - url: http://0.0.0.0:8080
+    description: Local development (default bind 0.0.0.0:8080)
 
 tags:
   - name: health
@@ -30,12 +50,16 @@ paths:
               schema:
                 type: string
                 example: ok
+        "500":
+          $ref: "#/components/responses/ApiError"
 
-  /api/statistics:
+  /api/v1/statistics:
     get:
       tags: [markets]
       operationId: getStatistics
       summary: Platform statistics
+      parameters:
+        - $ref: "#/components/parameters/apiVersion"
       responses:
         "200":
           description: Statistics payload
@@ -43,14 +67,22 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AnyObject"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
         "500":
           $ref: "#/components/responses/ApiError"
 
-  /api/markets/featured:
+  /api/v1/markets/featured:
     get:
       tags: [markets]
       operationId: getFeaturedMarkets
       summary: List featured markets
+      parameters:
+        - $ref: "#/components/parameters/apiVersion"
       responses:
         "200":
           description: Array of featured markets
@@ -60,15 +92,20 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/FeaturedMarketView"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
         "500":
           $ref: "#/components/responses/ApiError"
 
-  /api/content:
+  /api/v1/content:
     get:
       tags: [markets]
       operationId: getContent
       summary: Paginated content feed
       parameters:
+        - $ref: "#/components/parameters/apiVersion"
         - $ref: "#/components/parameters/page"
         - $ref: "#/components/parameters/pageSize"
       responses:
@@ -78,16 +115,23 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AnyObject"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
         "500":
           $ref: "#/components/responses/ApiError"
 
-  /api/markets/{market_id}/resolve:
+  /api/v1/markets/{market_id}/resolve:
     post:
       tags: [markets]
       operationId: resolveMarket
       summary: Resolve a market and invalidate caches (admin)
+      security:
+        - ApiKeyAuth: []
       parameters:
         - $ref: "#/components/parameters/marketId"
+        - $ref: "#/components/parameters/apiVersion"
       responses:
         "200":
           description: Cache invalidation result
@@ -95,31 +139,63 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InvalidationResult"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
         "500":
           $ref: "#/components/responses/ApiError"
 
-  /api/blockchain/health:
+  /api/v1/blockchain/health:
     get:
       tags: [blockchain]
       operationId: getBlockchainHealth
-      summary: Blockchain node health
+      summary: Blockchain node and contract health
+      parameters:
+        - $ref: "#/components/parameters/apiVersion"
+      description: |
+        Returns the health of the blockchain node and contract.
+
+        **`status` values:**
+        - `healthy` – node reachable and contract readable. HTTP 200.
+        - `degraded` – node reachable but contract read failed. HTTP 503.
+        - `unhealthy` – node unreachable. HTTP 503.
+
+        `is_healthy` is `true` only when `status == "healthy"` (backwards-compatible field).
       responses:
         "200":
-          description: Health data
+          description: Node and contract are healthy
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AnyObject"
+                $ref: "#/components/schemas/BlockchainHealth"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
         "500":
           $ref: "#/components/responses/ApiError"
+        "503":
+          description: Degraded (node up, contract unreachable) or unhealthy (node down)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BlockchainHealth"
 
-  /api/blockchain/markets/{market_id}:
+  /api/v1/blockchain/markets/{market_id}:
     get:
       tags: [blockchain]
       operationId: getBlockchainMarket
       summary: On-chain market data
       parameters:
         - $ref: "#/components/parameters/marketId"
+        - $ref: "#/components/parameters/apiVersion"
       responses:
         "200":
           description: Market chain data
@@ -127,14 +203,22 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AnyObject"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
         "500":
           $ref: "#/components/responses/ApiError"
 
-  /api/blockchain/stats:
+  /api/v1/blockchain/stats:
     get:
       tags: [blockchain]
       operationId: getBlockchainStats
       summary: Platform on-chain statistics
+      parameters:
+        - $ref: "#/components/parameters/apiVersion"
       responses:
         "200":
           description: Platform stats
@@ -142,10 +226,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AnyObject"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
         "500":
           $ref: "#/components/responses/ApiError"
 
-  /api/blockchain/users/{user}/bets:
+  /api/v1/blockchain/users/{user}/bets:
     get:
       tags: [blockchain]
       operationId: getUserBets
@@ -157,6 +245,7 @@ paths:
           schema:
             type: string
           description: Stellar address of the user
+        - $ref: "#/components/parameters/apiVersion"
         - $ref: "#/components/parameters/page"
         - $ref: "#/components/parameters/pageSize"
       responses:
@@ -166,16 +255,23 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AnyObject"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
         "500":
           $ref: "#/components/responses/ApiError"
 
-  /api/blockchain/oracle/{market_id}:
+  /api/v1/blockchain/oracle/{market_id}:
     get:
       tags: [blockchain]
       operationId: getOracleResult
       summary: Oracle result for a market
       parameters:
         - $ref: "#/components/parameters/marketId"
+        - $ref: "#/components/parameters/apiVersion"
       responses:
         "200":
           description: Oracle result
@@ -183,10 +279,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AnyObject"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
         "500":
           $ref: "#/components/responses/ApiError"
 
-  /api/blockchain/tx/{tx_hash}:
+  /api/v1/blockchain/tx/{tx_hash}:
     get:
       tags: [blockchain]
       operationId: getTransactionStatus
@@ -197,6 +299,7 @@ paths:
           required: true
           schema:
             type: string
+        - $ref: "#/components/parameters/apiVersion"
       responses:
         "200":
           description: Transaction status
@@ -204,6 +307,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AnyObject"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
         "500":
           $ref: "#/components/responses/ApiError"
 
@@ -212,6 +321,9 @@ paths:
       tags: [newsletter]
       operationId: newsletterSubscribe
       summary: Subscribe to newsletter
+      parameters:
+        - $ref: "#/components/parameters/apiVersion"
+        - $ref: "#/components/parameters/idempotencyKey"
       requestBody:
         required: true
         content:
@@ -227,6 +339,8 @@ paths:
           $ref: "#/components/responses/NewsletterResponse"
         "429":
           $ref: "#/components/responses/NewsletterResponse"
+        "500":
+          $ref: "#/components/responses/ApiError"
 
   /api/v1/newsletter/confirm:
     get:
@@ -246,6 +360,8 @@ paths:
           $ref: "#/components/responses/NewsletterResponse"
         "404":
           $ref: "#/components/responses/NewsletterResponse"
+        "500":
+          $ref: "#/components/responses/ApiError"
 
   /api/v1/newsletter/unsubscribe:
     delete:
@@ -263,6 +379,10 @@ paths:
           $ref: "#/components/responses/NewsletterResponse"
         "400":
           $ref: "#/components/responses/NewsletterResponse"
+        "404":
+          $ref: "#/components/responses/NewsletterResponse"
+        "500":
+          $ref: "#/components/responses/ApiError"
 
   /api/v1/newsletter/gdpr/export:
     get:
@@ -287,6 +407,8 @@ paths:
           $ref: "#/components/responses/NewsletterResponse"
         "404":
           $ref: "#/components/responses/NewsletterResponse"
+        "500":
+          $ref: "#/components/responses/ApiError"
 
   /api/v1/newsletter/gdpr/delete:
     delete:
@@ -304,12 +426,18 @@ paths:
           $ref: "#/components/responses/NewsletterResponse"
         "400":
           $ref: "#/components/responses/NewsletterResponse"
+        "404":
+          $ref: "#/components/responses/NewsletterResponse"
+        "500":
+          $ref: "#/components/responses/ApiError"
 
   /api/v1/email/preview/{template_name}:
     get:
       tags: [email]
       operationId: emailPreview
       summary: Preview a rendered email template (admin)
+      security:
+        - ApiKeyAuth: []
       parameters:
         - name: template_name
           in: path
@@ -328,6 +456,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AnyObject"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
         "500":
           $ref: "#/components/responses/ApiError"
 
@@ -336,6 +474,8 @@ paths:
       tags: [email]
       operationId: emailSendTest
       summary: Send a test email (admin)
+      security:
+        - ApiKeyAuth: []
       requestBody:
         required: true
         content:
@@ -349,6 +489,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/EmailTestResponse"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
         "500":
           $ref: "#/components/responses/ApiError"
 
@@ -357,6 +505,8 @@ paths:
       tags: [email]
       operationId: getEmailAnalytics
       summary: Email analytics (admin)
+      security:
+        - ApiKeyAuth: []
       parameters:
         - name: template_name
           in: query
@@ -378,6 +528,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AnyObject"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
         "500":
           $ref: "#/components/responses/ApiError"
 
@@ -386,6 +544,8 @@ paths:
       tags: [email]
       operationId: getEmailQueueStats
       summary: Email queue statistics (admin)
+      security:
+        - ApiKeyAuth: []
       responses:
         "200":
           description: Queue stats
@@ -393,6 +553,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AnyObject"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
         "500":
           $ref: "#/components/responses/ApiError"
 
@@ -400,7 +568,40 @@ paths:
     post:
       tags: [webhooks]
       operationId: sendgridWebhook
-      summary: SendGrid event webhook receiver
+      summary: SendGrid event webhook receiver (provider-signed)
+      description: |
+        Receives webhook events from SendGrid for email delivery, bounce, complaint, 
+        and engagement tracking (opens, clicks, unsubscribes).
+        
+        ## Security Model
+        
+        This endpoint uses **provider signature verification** (not API key authentication).
+        
+        - **Authentication**: HMAC-SHA256 signature in `X-Twilio-Email-Event-Webhook-Signature` header
+        - **Timestamp verification**: `X-Twilio-Email-Event-Webhook-Timestamp` must be within 300 seconds
+        - **Replay protection**: Checked per (message_id, event_type, recipient, timestamp)
+        
+        This security model is appropriate for webhooks because:
+        1. SendGrid is the only caller (not user-initiated)
+        2. Signature proves the provider encrypted the request
+        3. No need for per-user API keys on public-facing webhook endpoints
+        
+      security:
+        - SendGridWebhook: []
+      parameters:
+        - name: X-Twilio-Email-Event-Webhook-Signature
+          in: header
+          required: true
+          schema:
+            type: string
+          description: HMAC-SHA256 signature of timestamp+body, base64-encoded. Signature is computed as Base64(HMAC-SHA256(secret, timestamp+body))
+        - name: X-Twilio-Email-Event-Webhook-Timestamp
+          in: header
+          required: true
+          schema:
+            type: string
+            format: int64
+          description: Unix timestamp of the request (replay protection window is 300 seconds)
       requestBody:
         required: true
         content:
@@ -411,10 +612,56 @@ paths:
                 $ref: "#/components/schemas/AnyObject"
       responses:
         "200":
-          description: Webhook processed
+          description: Webhook processed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  processed:
+                    type: integer
+                    description: Number of events processed
+                  errors:
+                    type: array
+                    items:
+                      type: string
+                    nullable: true
+                    description: List of processing errors, if any
+        "400":
+          description: Invalid request or signature
+          $ref: "#/components/responses/ApiError"
+        "401":
+          description: Signature verification failed (not authorized as SendGrid)
+          $ref: "#/components/responses/ApiError"
+        "429":
+          $ref: "#/components/responses/ApiError"
+        "500":
+          $ref: "#/components/responses/ApiError"
 
 components:
   parameters:
+    apiVersion:
+      name: API-Version
+      in: header
+      required: false
+      schema:
+        type: string
+        enum: [v1]
+        default: v1
+      description: |
+        Target API version. Defaults to the current stable version (`v1`).
+        Responses for deprecated versions include `Deprecation`, `Sunset`, and `Link` headers.
+    idempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        maxLength: 128
+      description: |
+        Client-generated unique key (e.g. UUID v4) to deduplicate mutating requests.
+        If a request with the same key was processed within the idempotency window,
+        the cached response is returned immediately without re-executing the operation.
     marketId:
       name: market_id
       in: path
@@ -447,12 +694,47 @@ components:
       type: object
       additionalProperties: true
 
+    BlockchainHealth:
+      type: object
+      required: [network, rpc_url, latest_ledger, status, is_healthy, contract_reachable, checked_at_unix, data_source]
+      properties:
+        network:
+          type: string
+        rpc_url:
+          type: string
+        latest_ledger:
+          type: integer
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+          description: healthy = node + contract OK; degraded = node OK but contract unreadable; unhealthy = node unreachable
+        is_healthy:
+          type: boolean
+          description: true only when status is healthy (backwards-compatible)
+        contract_reachable:
+          type: boolean
+        checked_at_unix:
+          type: integer
+        data_source:
+          type: string
+          enum: [live, stale_cache, rpc_fallback]
+
     ApiError:
       type: object
-      required: [message]
+      required: [code, message]
       properties:
+        code:
+          type: string
+          description: Machine-readable error code
+          example: INTERNAL_ERROR
         message:
           type: string
+          description: Human-readable error description
+        details:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: Optional additional context about the error
 
     FeaturedMarketView:
       type: object
@@ -543,7 +825,7 @@ components:
 
   responses:
     ApiError:
-      description: Internal server error
+      description: Error response with machine-readable code
       content:
         application/json:
           schema:
@@ -554,3 +836,15 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/NewsletterResponse"
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Admin API key required for protected endpoints
+    SendGridWebhook:
+      type: apiKey
+      in: header
+      name: X-Twilio-Email-Event-Webhook-Signature
+      description: HMAC-SHA256 signature provided by SendGrid on webhook delivery
