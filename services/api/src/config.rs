@@ -719,6 +719,7 @@ mod tests {
             newsletter_rate_limit_max: 5,
             newsletter_rate_limit_window_secs: 3600,
             email_stale_job_threshold_secs: 3600,
+            newsletter_cleanup_batch_size: 500,
             unsubscribe_signing_secret: None,
             cors: CorsConfig {
                 dev_mode: false,
@@ -789,6 +790,7 @@ mod tests {
             newsletter_rate_limit_max: 5,
             newsletter_rate_limit_window_secs: 3600,
             email_stale_job_threshold_secs: 3600,
+            newsletter_cleanup_batch_size: 500,
             unsubscribe_signing_secret: None,
             cors: CorsConfig {
                 dev_mode: false,
@@ -859,6 +861,7 @@ mod tests {
             newsletter_rate_limit_max: 5,
             newsletter_rate_limit_window_secs: 3600,
             email_stale_job_threshold_secs: 3600,
+            newsletter_cleanup_batch_size: 500,
             unsubscribe_signing_secret: None,
             cors: CorsConfig {
                 dev_mode: false,
@@ -929,6 +932,7 @@ mod tests {
             newsletter_rate_limit_max: 5,
             newsletter_rate_limit_window_secs: 3600,
             email_stale_job_threshold_secs: 3600,
+            newsletter_cleanup_batch_size: 500,
             unsubscribe_signing_secret: None,
             cors: CorsConfig {
                 dev_mode: false,
