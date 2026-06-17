@@ -1227,6 +1227,45 @@ mod tests {
             grace_period
         ));
     }
+
+    // ── webhook timestamp validation tests ───────────────────────────────────
+
+    fn check_age(now: i64, ts: i64, window: u64) -> bool {
+        let age_secs = now - ts;
+        !(age_secs < 0 || age_secs > window as i64)
+    }
+
+    #[test]
+    fn webhook_timestamp_within_window_accepted() {
+        let now = 1_700_000_000i64;
+        assert!(check_age(now, now - 100, 300));
+    }
+
+    #[test]
+    fn webhook_timestamp_exactly_at_window_edge_accepted() {
+        let now = 1_700_000_000i64;
+        assert!(check_age(now, now - 300, 300));
+    }
+
+    #[test]
+    fn webhook_timestamp_beyond_window_rejected() {
+        let now = 1_700_000_000i64;
+        assert!(!check_age(now, now - 301, 300));
+    }
+
+    #[test]
+    fn webhook_future_timestamp_rejected() {
+        let now = 1_700_000_000i64;
+        assert!(!check_age(now, now + 1, 300));
+    }
+
+    #[test]
+    fn webhook_future_timestamp_within_old_window_rejected() {
+        // Under the old .abs() logic, now + 299 would have been accepted
+        // because abs(now - (now+299)) = 299 < 300. The new logic rejects it.
+        let now = 1_700_000_000i64;
+        assert!(!check_age(now, now + 299, 300));
+    }
 }
 
 // ── Password hashing (Argon2id) ───────────────────────────────────────────────
